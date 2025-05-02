@@ -19,7 +19,7 @@ import java.nio.ByteOrder;
  *   <li>Otherwise, a successful response is returned with error_code 0 and one ApiVersion entry 
  *       (api_key 18, min_version 0, max_version 4).</li>
  * </ul>
- * <p
+ * <
  * The successful response body layout (15 bytes) is as follows:
  * <pre>
  *   error_code                : INT16 (2 bytes)
