@@ -52,45 +52,48 @@ public class Main {
             
             if (requestApiKey == 18) { // ApiVersions request
                 if (errorCode != 0) {
-                    // Error response: minimal body
-                    // For error, build: error_code (2 bytes) + empty array (compact array length 0) + throttle_time_ms (4 bytes) + empty TAG_BUFFER (1 byte)
-                    ByteBuffer buffer = ByteBuffer.allocate(4 + 2 + 1 + 4 + 1);
+                    // Error response: minimal body.
+                    // Body: error_code (2 bytes) + compact array (1 byte: 0 for no elements) 
+                    //       + throttle_time_ms (4 bytes) + response TAG_BUFFER (1 byte)
+                    // => Body length = 2 + 1 + 4 + 1 = 8 bytes.
+                    // Overall message: 4 bytes (correlation_id) + 8 = 12 bytes.
+                    ByteBuffer buffer = ByteBuffer.allocate(4 + 8);
                     buffer.order(ByteOrder.BIG_ENDIAN);
-                    buffer.putInt( (4 + 2 + 1 + 4 + 1) ); // message_length = 12
-                    buffer.putInt(correlationId);
-                    buffer.putShort(errorCode);
-                    buffer.put((byte)0); // compact array: 0 elements (0 means no elements)
-                    buffer.putInt(0);    // throttle_time_ms = 0
-                    buffer.put((byte)0); // empty response TAG_BUFFER
+                    buffer.putInt(4 + 8);         // message_length = 12 bytes (correlation_id + body)
+                    buffer.putInt(correlationId);   // correlation_id
+                    buffer.putShort(errorCode);     // error_code
+                    buffer.put((byte)0);            // compact array: no elements
+                    buffer.putInt(0);               // throttle_time_ms = 0
+                    buffer.put((byte)0);            // empty response TAG_BUFFER
                     out.write(buffer.array());
                 } else {
                     // Successful response using flexible (compact) encoding.
                     // Response body fields:
-                    // error_code: 2 bytes
-                    // api_keys: compact array. For one element, length = 1+1 = 2 (0x02)
-                    //   Entry:
-                    //      api_key: INT16 (2 bytes) => 18
-                    //      min_version: INT16 (2 bytes) => 0
-                    //      max_version: INT16 (2 bytes) => 4
-                    //      entry TAG_BUFFER: empty compact bytes (1 byte 0x00)
-                    // throttle_time_ms: INT32 (4 bytes, 0)
-                    // response TAG_BUFFER: compact bytes (empty, 1 byte 0x00)
+                    // - error_code: 2 bytes (value 0)
+                    // - api_keys: compact array:
+                    //     Length: unsigned varint (1 byte), for one element equals 1+1 = 2
+                    //     Entry: api_key (2 bytes, value 18), 
+                    //            min_version (2 bytes, value 0), 
+                    //            max_version (2 bytes, value 4),
+                    //            entry TAG_BUFFER: 1 byte (empty, 0x00)
+                    // - throttle_time_ms: 4 bytes (value 0)
+                    // - response TAG_BUFFER: compact bytes (1 byte, 0x00)
                     //
                     // Body length = 2 + 1 + (2+2+2+1) + 4 + 1 = 15 bytes.
-                    // Overall message: 4 (correlation_id) + 15 = 19 bytes.
-                    
-                    ByteBuffer buffer = ByteBuffer.allocate(4 + 15); // 4 bytes for correlation_id not included in message_length field.
+                    // Overall message = correlation_id (4 bytes) + body (15 bytes) = 19 bytes.
+                    // Total bytes transmitted = message_length field (4) + 19 = 23 bytes.
+                    ByteBuffer buffer = ByteBuffer.allocate(4 + 4 + 15); // 4 for message_length, 4 for correlation_id, 15 for body.
                     buffer.order(ByteOrder.BIG_ENDIAN);
-                    buffer.putInt(19);                // message_length: total bytes after this field (19)
-                    buffer.putInt(correlationId);       // correlation_id
-                    buffer.putShort((short)0);          // error_code = 0
-                    buffer.put((byte)2);                // compact array length = 2 (1 element + 1)
-                    buffer.putShort((short)18);         // api_key = 18
-                    buffer.putShort((short)0);          // min_version = 0
-                    buffer.putShort((short)4);          // max_version = 4
-                    buffer.put((byte)0);                // entry TAG_BUFFER = empty
-                    buffer.putInt(0);                   // throttle_time_ms = 0
-                    buffer.put((byte)0);                // response TAG_BUFFER = empty
+                    buffer.putInt(4 + 15);               // message_length = 19 bytes (correlation_id + body)
+                    buffer.putInt(correlationId);          // correlation_id
+                    buffer.putShort((short)0);             // error_code = 0
+                    buffer.put((byte)2);                   // compact array length = 2 (one element + 1)
+                    buffer.putShort((short)18);            // api_key = 18
+                    buffer.putShort((short)0);             // min_version = 0
+                    buffer.putShort((short)4);             // max_version = 4
+                    buffer.put((byte)0);                   // entry TAG_BUFFER = empty
+                    buffer.putInt(0);                      // throttle_time_ms = 0
+                    buffer.put((byte)0);                   // response TAG_BUFFER = empty
                     out.write(buffer.array());
                 }
                 out.flush();
