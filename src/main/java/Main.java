@@ -19,7 +19,7 @@ import java.nio.ByteOrder;
  *   <li>Otherwise, a successful response is returned with error_code 0 and one ApiVersion entry 
  *       (api_key 18, min_version 0, max_version 4).</li>
  * </ul>
- * <
+ * <p>
  * The successful response body layout (15 bytes) is as follows:
  * <pre>
  *   error_code                : INT16 (2 bytes)
@@ -82,7 +82,7 @@ public class Main {
      * <p>
      * Header layout:
      * <ul>
-     *   <li>4 bytes: request message size (unused)</li>
+     *   <li>4 bytes: request message size (size of data following this field)</li>
      *   <li>2 bytes: api_key (INT16)</li>
      *   <li>2 bytes: api_version (INT16)</li>
      *   <li>4 bytes: correlation_id (INT32)</li>
@@ -93,13 +93,20 @@ public class Main {
      * @throws IOException if reading fails.
      */
     public static RequestHeader readRequestHeader(InputStream in) throws IOException {
-        byte[] headerBytes = readNBytes(in, 12);
-        ByteBuffer buffer = ByteBuffer.wrap(headerBytes);
-        buffer.order(ByteOrder.BIG_ENDIAN);
-        int messageSize = buffer.getInt(); // Not used
-        short apiKey = buffer.getShort();
-        short apiVersion = buffer.getShort();
-        int correlationId = buffer.getInt();
+        // Read size field (4 bytes)
+        byte[] sizeBytes = readNBytes(in, 4);
+        ByteBuffer sizeBuffer = ByteBuffer.wrap(sizeBytes);
+        sizeBuffer.order(ByteOrder.BIG_ENDIAN);
+        int messageSize = sizeBuffer.getInt();
+
+        // Read the rest of the header (8 bytes)
+        byte[] headerBytes = readNBytes(in, 8);
+        ByteBuffer headerBuffer = ByteBuffer.wrap(headerBytes);
+        headerBuffer.order(ByteOrder.BIG_ENDIAN);
+        short apiKey = headerBuffer.getShort();
+        short apiVersion = headerBuffer.getShort();
+        int correlationId = headerBuffer.getInt();
+
         return new RequestHeader(messageSize, apiKey, apiVersion, correlationId);
     }
 
@@ -175,18 +182,6 @@ public class Main {
 
     /**
      * Handles an individual client connection.
-     * <p>
-     * The method reads the fixed header, discards any extra request bytes, and
-     * sends back an API Versions response. It loops to process multiple sequential requests 
-     * over the same connection until the client closes the connection.
-     * For ApiVersions requests (api_key == 18):
-     * <ul>
-     *   <li>If the request_api_version is unsupported (< 0 or > 4), an error response (error_code 35) is returned.</li>
-     *   <li>Otherwise, a successful response is returned.</li>
-     * </ul>
-     * 
-     * @param clientSocket the accepted client socket.
-     * @throws IOException if any I/O error occurs.
      */
     public static void handleClient(Socket clientSocket) throws IOException {
         InputStream in = clientSocket.getInputStream();
@@ -205,15 +200,16 @@ public class Main {
                     ", requested api_version: " + header.apiVersion);
             System.err.println("Received request size: " + header.requestSize);
 
-            // Discard any remaining request bytes.
-            int headerBytesRead = 12; // Already read the fixed header
-            int extraBytes = header.requestSize - headerBytesRead;
-            while (extraBytes > 0) {
-                byte[] discardBuffer = new byte[Math.min(4096, extraBytes)];
+            // Discard remaining request bytes.
+            // The request_size field specifies size of data after itself,
+            // we've read 8 bytes of header, so remaining = request_size - 8
+            int remainingBytes = header.requestSize - 8;
+            while (remainingBytes > 0) {
+                byte[] discardBuffer = new byte[Math.min(4096, remainingBytes)];
                 int read = in.read(discardBuffer);
                 if (read == -1)
                     break;
-                extraBytes -= read;
+                remainingBytes -= read;
             }
 
             // Process ApiVersions request.
