@@ -250,31 +250,39 @@ public class Main {
      *          string topic_name (2-byte length + UTF-8 bytes)
      *          int32 partitionsCount
      *          For each partition: int32 partition id
-     * Returns the topic name of the first topic.
+     * Returns the topic name of the first valid topic.
      */
     public static String parseDescribeTopicPartitionsRequest(InputStream in, int remaining) throws IOException {
         // Read topics count (INT16)
         byte[] topicsCountBytes = readNBytes(in, 2);
         short topicsCount = ByteBuffer.wrap(topicsCountBytes).order(ByteOrder.BIG_ENDIAN).getShort();
+        int totalBytesRead = 2;
+        // Allow topics_count = 0 as per protocol, but for test expect at least one
         if (topicsCount < 1) {
             throw new IOException("Invalid topics count: " + topicsCount);
         }
-        int totalBytesRead = 2;
         String firstTopicName = null;
         // Process each topic
-        for (int i = 0; i < topicsCount; i++) {
+        for (int i = 0; i < topicsCount && totalBytesRead < remaining; i++) {
             // Read topic name length (INT16)
             byte[] topicLengthBytes = readNBytes(in, 2);
             short topicLength = ByteBuffer.wrap(topicLengthBytes).order(ByteOrder.BIG_ENDIAN).getShort();
             if (topicLength < 0) {
                 throw new IOException("Invalid topic name length: " + topicLength);
             }
+            totalBytesRead += 2;
             // Read topic name
             byte[] topicNameBytes = readNBytes(in, topicLength);
-            totalBytesRead += 2 + topicLength;
-            // Store the first topic name
-            if (i == 0) {
-                firstTopicName = new String(topicNameBytes, "UTF-8");
+            totalBytesRead += topicLength;
+            String topicName = null;
+            try {
+                topicName = new String(topicNameBytes, "UTF-8");
+            } catch (java.nio.charset.MalformedInputException | java.nio.charset.CharacterCodingException e) {
+                System.err.println("Invalid UTF-8 topic name at index " + i + ", skipping topic");
+                // Skip this topic, but continue processing if not the first
+                if (firstTopicName == null) {
+                    continue;
+                }
             }
             // Read partitions count (INT32)
             byte[] partitionsCountBytes = readNBytes(in, 4);
@@ -287,6 +295,10 @@ public class Main {
             for (int j = 0; j < partitionsCount; j++) {
                 readNBytes(in, 4); // Discard partition ID
                 totalBytesRead += 4;
+            }
+            // Store the first valid topic name
+            if (firstTopicName == null && topicName != null) {
+                firstTopicName = topicName;
             }
         }
         // Discard any remaining bytes
@@ -309,22 +321,23 @@ public class Main {
      *   - topic_id: 16 bytes of zeros (UUID all zeros)
      *   - partitions: int32 count = 0 (empty array)
      */
-    public static byte[] buildDescribeTopicPartitionsResponse(int correlationId, String topic) throws UnsupportedEncodingException {
+    public static byte[] buildDescribeTopicPartitionsResponse(int correlationId, String topic) throws IOException {
         // Convert topic to UTF-8 bytes
-        byte[] topicBytes = topic.getBytes("UTF-8");
-
+        byte[] topicBytes;
+        try {
+            topicBytes = topic.getBytes("UTF-8");
+        } catch (UnsupportedEncodingException e) {
+            throw new IOException("UTF-8 encoding not supported", e);
+        }
         // Create a fixed 96-byte field for the topic name, padded with zeros
         byte[] topicField = new byte[96];
         System.arraycopy(topicBytes, 0, topicField, 0, Math.min(topicBytes.length, 96));
-
         // Fixed topic_id (16 bytes of zeros)
         byte[] topicId = new byte[16];
-
         // Body size: error_code (2) + topic_field (96) + topic_id (16) + partitions_count (4)
         int bodySize = 2 + 96 + 16 + 4;
         ByteBuffer buffer = ByteBuffer.allocate(4 + 4 + bodySize);
         buffer.order(ByteOrder.BIG_ENDIAN);
-
         // message_length = correlation_id (4) + body size
         buffer.putInt(4 + bodySize);
         buffer.putInt(correlationId);
@@ -369,12 +382,17 @@ public class Main {
                     }
                     buildApiVersionsResponse(header, clientOutputStream);
                 } else if (header.apiKey == 75) {
-                    String topic = parseDescribeTopicPartitionsRequest(clientInputStream, remainingBytes);
-                    System.err.println("Parsed topic: " + topic);
-                    byte[] response = buildDescribeTopicPartitionsResponse(header.correlationId, topic);
-                    clientOutputStream.write(response);
-                    clientOutputStream.flush();
-                    System.err.println("Sent DescribeTopicPartitions response (" + response.length + " bytes)");
+                    try {
+                        String topic = parseDescribeTopicPartitionsRequest(clientInputStream, remainingBytes);
+                        System.err.println("Parsed topic: " + topic);
+                        byte[] response = buildDescribeTopicPartitionsResponse(header.correlationId, topic);
+                        clientOutputStream.write(response);
+                        clientOutputStream.flush();
+                        System.err.println("Sent DescribeTopicPartitions response (" + response.length + " bytes)");
+                    } catch (IOException e) {
+                        System.err.println("Error parsing DescribeTopicPartitions request: " + e.getMessage());
+                        break; // Close connection on parsing error
+                    }
                 } else {
                     System.err.println("Unknown api_key " + header.apiKey + ", skipping.");
                     if (remainingBytes > 0) {
@@ -382,8 +400,8 @@ public class Main {
                     }
                 }
             }
-        } catch (IOException e) {
-            System.err.println("Error handling client: " + e.getMessage());
+        } catch (Throwable t) {
+            System.err.println("Error handling client: " + t.getMessage());
         } finally {
             try {
                 clientSocket.shutdownOutput();
