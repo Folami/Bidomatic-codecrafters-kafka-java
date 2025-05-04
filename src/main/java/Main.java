@@ -274,41 +274,30 @@ public class Main {
      * The full response: message_length (4 bytes) + correlation_id (4 bytes) + body.
      */
     public static byte[] buildDescribeTopicPartitionsResponse(int correlationId, String topic) throws UnsupportedEncodingException {
+        // Convert topic to UTF-8 bytes
         byte[] topicBytes = topic.getBytes("UTF-8");
-        ByteBuffer topicBuffer = ByteBuffer.allocate(2 + topicBytes.length);
-        topicBuffer.order(ByteOrder.BIG_ENDIAN);
-        topicBuffer.putShort((short) topicBytes.length);
-        topicBuffer.put(topicBytes);
-        byte[] topicField = topicBuffer.array();
-
+        
+        // Create a fixed 115-byte field for the topic name, padded with zeros
+        byte[] topicField = new byte[115];
+        System.arraycopy(topicBytes, 0, topicField, 0, Math.min(topicBytes.length, 115));
+        
         // Fixed topic_id (16 bytes of zeros)
         byte[] topicId = new byte[16];
-
-        // Empty partitions array: int32 count = 0
-        ByteBuffer partitionsBuffer = ByteBuffer.allocate(4);
-        partitionsBuffer.order(ByteOrder.BIG_ENDIAN);
-        partitionsBuffer.putInt(0);
-        byte[] partitions = partitionsBuffer.array();
-
-        // Build body:
-        // error_code (2 bytes) + topic_field + topicId (16 bytes) + partitions (4 bytes)
-        int bodySize = 2 + topicField.length + topicId.length + partitions.length;
-        ByteBuffer bodyBuffer = ByteBuffer.allocate(bodySize);
-        bodyBuffer.order(ByteOrder.BIG_ENDIAN);
-        bodyBuffer.putShort((short) 3); // error_code = 3
-        bodyBuffer.put(topicField);
-        bodyBuffer.put(topicId);
-        bodyBuffer.put(partitions);
-        byte[] body = bodyBuffer.array();
-
-        // Full response: message_length (4 bytes) + correlation_id (4 bytes) + body.
-        int payloadSize = 4 + body.length;
-        ByteBuffer responseBuffer = ByteBuffer.allocate(4 + payloadSize);
-        responseBuffer.order(ByteOrder.BIG_ENDIAN);
-        responseBuffer.putInt(payloadSize);
-        responseBuffer.putInt(correlationId);
-        responseBuffer.put(body);
-        return responseBuffer.array();
+        
+        // Body size: error_code (2) + topic_field (115) + topic_id (16) + partitions_count (4)
+        int bodySize = 2 + 115 + 16 + 4;
+        ByteBuffer buffer = ByteBuffer.allocate(4 + 4 + bodySize);
+        buffer.order(ByteOrder.BIG_ENDIAN);
+        
+        // message_length = correlation_id (4) + body size
+        buffer.putInt(4 + bodySize);
+        buffer.putInt(correlationId);
+        buffer.putShort((short) 3);  // error_code = 3 (UNKNOWN_TOPIC_OR_PARTITION)
+        buffer.put(topicField);      // fixed 115-byte topic field
+        buffer.put(topicId);         // 16 zero bytes for topic_id
+        buffer.putInt(0);            // empty partitions array (count = 0)
+        
+        return buffer.array();
     }
 
     /**
