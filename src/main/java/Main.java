@@ -239,7 +239,8 @@ public class Main {
                 // Calculate remaining bytes after header.
                 int remainingBytes = header.requestSize - 8;
                 if (remainingBytes > 0) {
-                    discardRemainingRequest(in, remainingBytes);
+                    discardRemainingRequest(clientInputStream, remainingBytes);
+                    System.err.println("Discarded " + remainingBytes + " bytes from request.");
                 }
 
                 // Process ApiVersions requests (api_key == 18).
