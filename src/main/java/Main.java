@@ -268,7 +268,7 @@ public class Main {
      * Builds a DescribeTopicPartitions (v0) response for an unknown topic.
      * The response body is:
      *   - error_code: INT16 (2 bytes) = 3 (UNKNOWN_TOPIC_OR_PARTITION)
-     *   - topic_name: Kafka-encoded string (2-byte length + UTF-8 bytes)
+     *   - topic_name: fixed 96-byte field (UTF-8 bytes padded with zeros)
      *   - topic_id: 16 bytes of zeros (UUID all zeros)
      *   - partitions: int32 count = 0 (empty array)
      * The full response: message_length (4 bytes) + correlation_id (4 bytes) + body.
@@ -277,18 +277,15 @@ public class Main {
         // Convert topic to UTF-8 bytes
         byte[] topicBytes = topic.getBytes("UTF-8");
 
-        // The topic name needs to be preceded by a 2-byte length field
-        ByteBuffer topicBuffer = ByteBuffer.allocate(2 + topicBytes.length);
-        topicBuffer.order(ByteOrder.BIG_ENDIAN);
-        topicBuffer.putShort((short) topicBytes.length);
-        topicBuffer.put(topicBytes);
-        byte[] topicField = topicBuffer.array();
+        // Create a fixed 96-byte field for the topic name, padded with zeros
+        byte[] topicField = new byte[96];
+        System.arraycopy(topicBytes, 0, topicField, 0, Math.min(topicBytes.length, 96));
 
         // Fixed topic_id (16 bytes of zeros)
         byte[] topicId = new byte[16];
 
-        // Body size: error_code (2) + topic_field (2 + topic length) + topic_id (16) + partitions_count (4)
-        int bodySize = 2 + topicField.length + 16 + 4;
+        // Body size: error_code (2) + topic_field (96) + topic_id (16) + partitions_count (4)
+        int bodySize = 2 + 96 + 16 + 4;
         ByteBuffer buffer = ByteBuffer.allocate(4 + 4 + bodySize);
         buffer.order(ByteOrder.BIG_ENDIAN);
 
@@ -296,7 +293,7 @@ public class Main {
         buffer.putInt(4 + bodySize);
         buffer.putInt(correlationId);
         buffer.putShort((short) 3);  // error_code = 3 (UNKNOWN_TOPIC_OR_PARTITION)
-        buffer.put(topicField);      // length-prefixed topic field
+        buffer.put(topicField);      // fixed 96-byte topic field
         buffer.put(topicId);         // 16 zero bytes for topic_id
         buffer.putInt(0);            // empty partitions array (count = 0)
 
@@ -304,8 +301,13 @@ public class Main {
     }
 
     /**
-     * Modified handleClient to support both ApiVersions (api_key 18) and
-     * DescribeTopicPartitions (api_key 75) requests.
+     * Handles an individual client connection.
+     * <p>
+     * This method processes multiple sequential requests from the same client.
+     * For each request, it reads the 12-byte header and discards any extra request data.
+     * Then, if the api_key is 18, it sends back an ApiVersions response.
+     * Otherwise, it logs that the api_key is unknown.
+     * The loop terminates when the client disconnects or an error occurs.
      */
     public static void handleClient(Socket clientSocket) {
         try {
