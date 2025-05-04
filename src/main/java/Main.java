@@ -252,34 +252,16 @@ public class Main {
      * Returns the topic name of the first topic.
      */
     public static String parseDescribeTopicPartitionsRequest(InputStream in, int remaining) throws IOException {
-        // Read topics count (2 bytes)
-        byte[] topicsCountBytes = readNBytes(in, 2);
-        short topicsCount = ByteBuffer.wrap(topicsCountBytes).order(ByteOrder.BIG_ENDIAN).getShort();
-        if (topicsCount <= 0) return "";
-        // Parse first topic:
+        // Read the topic string length (2 bytes) and the topic name bytes.
         byte[] topicLengthBytes = readNBytes(in, 2);
         short topicLength = ByteBuffer.wrap(topicLengthBytes).order(ByteOrder.BIG_ENDIAN).getShort();
         byte[] topicNameBytes = readNBytes(in, topicLength);
-        String topic = new String(topicNameBytes, "UTF-8");
-        // Read partitions count for this topic:
-        byte[] partitionsCountBytes = readNBytes(in, 4);
-        int partitionsCount = ByteBuffer.wrap(partitionsCountBytes).order(ByteOrder.BIG_ENDIAN).getInt();
-        // Skip partition ids (each 4 bytes)
-        if (partitionsCount > 0) {
-            readNBytes(in, partitionsCount * 4);
+        // Discard any extra bytes from the request body.
+        int bytesRead = 2 + topicLength;
+        if (remaining > bytesRead) {
+            discardRemainingRequest(in, remaining - bytesRead);
         }
-        // If additional topics exist, skip them.
-        for (int i = 1; i < topicsCount; i++) {
-            byte[] lenBytes = readNBytes(in, 2);
-            short len = ByteBuffer.wrap(lenBytes).order(ByteOrder.BIG_ENDIAN).getShort();
-            readNBytes(in, len);
-            byte[] pCountBytes = readNBytes(in, 4);
-            int pCount = ByteBuffer.wrap(pCountBytes).order(ByteOrder.BIG_ENDIAN).getInt();
-            if (pCount > 0) {
-                readNBytes(in, pCount * 4);
-            }
-        }
-        return topic;
+        return new String(topicNameBytes, "UTF-8");
     }
 
     /**
