@@ -133,7 +133,7 @@ public class Main {
      * @param header the request header containing api_key, api_version, and correlation_id.
      * @param out the output stream to send the response to.
      */
-    public static void buildApiVersionsRespone(RequestHeader header, OutputStream out) throws IOException {
+    public static void buildApiVersionsResponse(RequestHeader header, OutputStream out) throws IOException {
         if (header.apiVersion < 0 || header.apiVersion > 4) {
             System.err.println("Unsupported api_version " + header.apiVersion + ", sending error response.");
             byte[] errorResponse = buildErrorResponse(header.correlationId, (short) 35);
