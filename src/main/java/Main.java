@@ -5,6 +5,7 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
 import java.io.UnsupportedEncodingException;
 
 /**
@@ -254,6 +255,9 @@ public class Main {
      */
     public static String parseDescribeTopicPartitionsRequest(InputStream in, int remaining) throws IOException {
         // Read topics count (INT16)
+        if (remaining < 2) {
+            throw new IOException("Not enough bytes for topics count: " + remaining);
+        }
         byte[] topicsCountBytes = readNBytes(in, 2);
         short topicsCount = ByteBuffer.wrap(topicsCountBytes).order(ByteOrder.BIG_ENDIAN).getShort();
         int totalBytesRead = 2;
@@ -265,33 +269,48 @@ public class Main {
         // Process each topic
         for (int i = 0; i < topicsCount && totalBytesRead < remaining; i++) {
             // Read topic name length (INT16)
+            if (remaining - totalBytesRead < 2) {
+                System.err.println("Not enough bytes for topic name length at index " + i);
+                break; // Stop processing, use first valid topic if available
+            }
             byte[] topicLengthBytes = readNBytes(in, 2);
             short topicLength = ByteBuffer.wrap(topicLengthBytes).order(ByteOrder.BIG_ENDIAN).getShort();
             if (topicLength < 0) {
-                throw new IOException("Invalid topic name length: " + topicLength);
+                System.err.println("Invalid topic name length at index " + i + ": " + topicLength);
+                break;
             }
             totalBytesRead += 2;
             // Read topic name
+            if (remaining - totalBytesRead < topicLength) {
+                System.err.println("Not enough bytes for topic name at index " + i);
+                break;
+            }
             byte[] topicNameBytes = readNBytes(in, topicLength);
             totalBytesRead += topicLength;
             String topicName = null;
             try {
-                topicName = new String(topicNameBytes, "UTF-8");
-            } catch (UnsupportedEncodingException e) {
-                System.err.println("Invalid UTF-8 topic name at index " + i + ", skipping topic");
-                // Skip this topic, but continue processing if not the first
-                if (firstTopicName == null) {
-                    continue;
-                }
+                topicName = new String(topicNameBytes, StandardCharsets.UTF_8);
+            } catch (Exception e) {
+                System.err.println("Invalid UTF-8 topic name at index " + i + ": " + e.getMessage());
+                continue; // Skip this topic
             }
             // Read partitions count (INT32)
+            if (remaining - totalBytesRead < 4) {
+                System.err.println("Not enough bytes for partitions count at index " + i);
+                break;
+            }
             byte[] partitionsCountBytes = readNBytes(in, 4);
             int partitionsCount = ByteBuffer.wrap(partitionsCountBytes).order(ByteOrder.BIG_ENDIAN).getInt();
             if (partitionsCount < 0) {
-                throw new IOException("Invalid partitions count: " + partitionsCount);
+                System.err.println("Invalid partitions count at index " + i + ": " + partitionsCount);
+                break;
             }
             totalBytesRead += 4;
             // Read partition IDs (INT32 each)
+            if (remaining - totalBytesRead < partitionsCount * 4) {
+                System.err.println("Not enough bytes for partition IDs at index " + i);
+                break;
+            }
             for (int j = 0; j < partitionsCount; j++) {
                 readNBytes(in, 4); // Discard partition ID
                 totalBytesRead += 4;
@@ -382,17 +401,19 @@ public class Main {
                     }
                     buildApiVersionsResponse(header, clientOutputStream);
                 } else if (header.apiKey == 75) {
+                    String topic = null;
                     try {
-                        String topic = parseDescribeTopicPartitionsRequest(clientInputStream, remainingBytes);
+                        topic = parseDescribeTopicPartitionsRequest(clientInputStream, remainingBytes);
                         System.err.println("Parsed topic: " + topic);
-                        byte[] response = buildDescribeTopicPartitionsResponse(header.correlationId, topic);
-                        clientOutputStream.write(response);
-                        clientOutputStream.flush();
-                        System.err.println("Sent DescribeTopicPartitions response (" + response.length + " bytes)");
                     } catch (IOException e) {
                         System.err.println("Error parsing DescribeTopicPartitions request: " + e.getMessage());
-                        break; // Close connection on parsing error
+                        // Use a default topic name or the first parsed topic if available
+                        topic = (topic != null) ? topic : "unknown";
                     }
+                    byte[] response = buildDescribeTopicPartitionsResponse(header.correlationId, topic);
+                    clientOutputStream.write(response);
+                    clientOutputStream.flush();
+                    System.err.println("Sent DescribeTopicPartitions response (" + response.length + " bytes)");
                 } else {
                     System.err.println("Unknown api_key " + header.apiKey + ", skipping.");
                     if (remainingBytes > 0) {
