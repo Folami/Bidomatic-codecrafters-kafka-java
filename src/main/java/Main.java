@@ -195,19 +195,47 @@ public class Main {
      * @return the complete success response bytes.
      */
     public static byte[] buildSuccessResponse(int correlationId) {
-        ByteBuffer buffer = ByteBuffer.allocate(23);
+        // Successful response body:
+        // error_code         : 2 bytes
+        // compact array length: 1 byte (3 = 2 entries + 1)
+        // Entry 1 (ApiVersions): 7 bytes 
+        //     - api_key: 2 bytes (18)
+        //     - min_version: 2 bytes (0)
+        //     - max_version: 2 bytes (4)
+        //     - TAG_BUFFER: 1 byte
+        // Entry 2 (DescribeTopicPartitions): 7 bytes
+        //     - api_key: 2 bytes (75)
+        //     - min_version: 2 bytes (0)
+        //     - max_version: 2 bytes (0)
+        //     - TAG_BUFFER: 1 byte
+        // throttle_time_ms   : 4 bytes (0)
+        // overall TAG_BUFFER : 1 byte (0)
+        // Total body = 2 + 1 + 7 + 7 + 4 + 1 = 22 bytes.
+        //
+        // The full response consists of:
+        // message_length (4 bytes) + correlation_id (4 bytes) + body (22 bytes) = 30 bytes.
+        int bodySize = 22;
+        ByteBuffer buffer = ByteBuffer.allocate(4 + 4 + bodySize);
         buffer.order(ByteOrder.BIG_ENDIAN);
-        int bodySize = 15; // as specified
-        buffer.putInt(4 + bodySize); // message_length = correlation_id (4) + body (15) = 19 bytes
-        buffer.putInt(correlationId);
-        buffer.putShort((short) 0);   // error_code = 0
-        buffer.put((byte) 2);         // compact array length = 2 (one element + 1)
-        buffer.putShort((short) 18);  // api_key = 18 (API_VERSIONS)
-        buffer.putShort((short) 0);   // min_version = 0
-        buffer.putShort((short) 4);   // max_version = 4
-        buffer.put((byte) 0);         // entry TAG_BUFFER = empty
-        buffer.putInt(0);             // throttle_time_ms = 0
-        buffer.put((byte) 0);         // overall TAG_BUFFER = empty
+        buffer.putInt(4 + bodySize);      // message_length = 4 (correlation_id) + bodySize = 26 bytes payload
+        buffer.putInt(correlationId);       // correlation_id
+        buffer.putShort((short) 0);         // error_code = 0
+        buffer.put((byte) 3);               // compact array length = 3 (i.e. 2 entries + 1)
+        
+        // Entry 1: ApiVersions (api_key 18)
+        buffer.putShort((short) 18);        // api_key = 18
+        buffer.putShort((short) 0);         // min_version = 0
+        buffer.putShort((short) 4);         // max_version = 4
+        buffer.put((byte) 0);               // entry TAG_BUFFER
+        
+        // Entry 2: DescribeTopicPartitions (api_key 75)
+        buffer.putShort((short) 75);        // api_key = 75
+        buffer.putShort((short) 0);         // min_version = 0
+        buffer.putShort((short) 0);         // max_version = 0
+        buffer.put((byte) 0);               // entry TAG_BUFFER
+        
+        buffer.putInt(0);                   // throttle_time_ms = 0
+        buffer.put((byte) 0);               // overall TAG_BUFFER = 0
         return buffer.array();
     }
 
