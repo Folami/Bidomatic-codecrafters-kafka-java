@@ -117,9 +117,10 @@ public class Main {
     public static void discardRemainingRequest(InputStream in, int remaining) throws IOException {
         while (remaining > 0) {
             byte[] buffer = new byte[Math.min(4096, remaining)];
-            int read = in.read(buffer);
-            if (read == -1)
-                break;
+            int read = in.read(buffer, 0, Math.min(buffer.length, remaining));
+            if (read == -1) {
+                throw new IOException("Unexpected end of stream while discarding " + remaining + " bytes");
+            }
             remaining -= read;
         }
     }
@@ -258,88 +259,79 @@ public class Main {
         if (topicsCount < 1) {
             throw new IOException("Invalid topics count: " + topicsCount);
         }
-        // Read the first topic's name
-        byte[] topicLengthBytes = readNBytes(in, 2);
-        short topicLength = ByteBuffer.wrap(topicLengthBytes).order(ByteOrder.BIG_ENDIAN).getShort();
-        if (topicLength < 0) {
-            throw new IOException("Invalid topic name length: " + topicLength);
+        int totalBytesRead = 2;
+        String firstTopicName = null;
+        // Process each topic
+        for (int i = 0; i < topicsCount; i++) {
+            // Read topic name length (INT16)
+            byte[] topicLengthBytes = readNBytes(in, 2);
+            short topicLength = ByteBuffer.wrap(topicLengthBytes).order(ByteOrder.BIG_ENDIAN).getShort();
+            if (topicLength < 0) {
+                throw new IOException("Invalid topic name length: " + topicLength);
+            }
+            // Read topic name
+            byte[] topicNameBytes = readNBytes(in, topicLength);
+            totalBytesRead += 2 + topicLength;
+            // Store the first topic name
+            if (i == 0) {
+                firstTopicName = new String(topicNameBytes, "UTF-8");
+            }
+            // Read partitions count (INT32)
+            byte[] partitionsCountBytes = readNBytes(in, 4);
+            int partitionsCount = ByteBuffer.wrap(partitionsCountBytes).order(ByteOrder.BIG_ENDIAN).getInt();
+            if (partitionsCount < 0) {
+                throw new IOException("Invalid partitions count: " + partitionsCount);
+            }
+            totalBytesRead += 4;
+            // Read partition IDs (INT32 each)
+            for (int j = 0; j < partitionsCount; j++) {
+                readNBytes(in, 4); // Discard partition ID
+                totalBytesRead += 4;
+            }
         }
-        byte[] topicNameBytes = readNBytes(in, topicLength);
-        String topicName = new String(topicNameBytes, "UTF-8");
-        // Read partitions count (INT32)
-        byte[] partitionsCountBytes = readNBytes(in, 4);
-        int partitionsCount = ByteBuffer.wrap(partitionsCountBytes).order(ByteOrder.BIG_ENDIAN).getInt();
-        if (partitionsCount < 0) {
-            throw new IOException("Invalid partitions count: " + partitionsCount);
+        // Discard any remaining bytes
+        if (remaining > totalBytesRead) {
+            discardRemainingRequest(in, remaining - totalBytesRead);
+        } else if (remaining < totalBytesRead) {
+            throw new IOException("Request size mismatch: expected " + remaining + " bytes, read " + totalBytesRead);
         }
-        // Read partition IDs (INT32 each)
-        for (int i = 0; i < partitionsCount; i++) {
-            readNBytes(in, 4); // Discard partition ID
+        if (firstTopicName == null) {
+            throw new IOException("No valid topic name found");
         }
-        // Discard any remaining topics or bytes
-        int bytesRead = 2 + 2 + topicLength + 4 + (partitionsCount * 4);
-        if (remaining > bytesRead) {
-            discardRemainingRequest(in, remaining - bytesRead);
-        }
-        return topicName;
+        return firstTopicName;
     }
 
     /**
-     * Builds a DescribeTopicPartitions (v1-like) response for an unknown topic.
+     * Builds a DescribeTopicPartitions (v0) response for an unknown topic.
      * The response body is:
-     *   - throttle_time_ms: INT32 (4 bytes, value 0)
-     *   - topics: compact array:
-     *       - length: unsigned varint (2 for 1 topic + 1)
-     *       - topic:
-     *           - error_code: INT16 (2 bytes, value 3)
-     *           - name: COMPACT_NULLABLE_STRING (varint length + UTF-8 bytes)
-     *           - topic_id: UUID (16 bytes, all zeros)
-     *           - partitions: compact array (length 1, empty)
-     *           - topic_authorized_operations: INT32 (-1)
-     *           - TAG_BUFFER: 1 byte (0x00)
-     *   - TAG_BUFFER: 1 byte (0x00)
+     *   - error_code: INT16 (2 bytes) = 3 (UNKNOWN_TOPIC_OR_PARTITION)
+     *   - topic_name: fixed 96-byte field (UTF-8 bytes padded with zeros)
+     *   - topic_id: 16 bytes of zeros (UUID all zeros)
+     *   - partitions: int32 count = 0 (empty array)
      */
     public static byte[] buildDescribeTopicPartitionsResponse(int correlationId, String topic) throws UnsupportedEncodingException {
         // Convert topic to UTF-8 bytes
         byte[] topicBytes = topic.getBytes("UTF-8");
-        // COMPACT_NULLABLE_STRING: length (varint) + bytes
-        int topicLength = topicBytes.length;
-        // Encode length as unsigned varint (simplified: assume length < 128 for single byte)
-        int varintLength = 1; // For lengths < 128, varint is 1 byte
-        if (topicLength >= 128) {
-            varintLength = 2; // Adjust for larger lengths if needed
-        }
-        // Body size calculation:
-        // throttle_time_ms (4) + topics array length (1) + topic:
-        //   error_code (2) + name (varint + topicLength) + topic_id (16) + partitions (1) + auth_ops (4) + tag_buffer (1)
-        // + overall tag_buffer (1)
-        int topicEntrySize = 2 + varintLength + topicLength + 16 + 1 + 4 + 1;
-        int bodySize = 4 + 1 + topicEntrySize + 1;
-        int payloadSize = 4 + bodySize; // correlation_id (4) + body
-        ByteBuffer buffer = ByteBuffer.allocate(4 + payloadSize);
+
+        // Create a fixed 96-byte field for the topic name, padded with zeros
+        byte[] topicField = new byte[96];
+        System.arraycopy(topicBytes, 0, topicField, 0, Math.min(topicBytes.length, 96));
+
+        // Fixed topic_id (16 bytes of zeros)
+        byte[] topicId = new byte[16];
+
+        // Body size: error_code (2) + topic_field (96) + topic_id (16) + partitions_count (4)
+        int bodySize = 2 + 96 + 16 + 4;
+        ByteBuffer buffer = ByteBuffer.allocate(4 + 4 + bodySize);
         buffer.order(ByteOrder.BIG_ENDIAN);
-        // Message length
-        buffer.putInt(payloadSize);
-        // Correlation ID
+
+        // message_length = correlation_id (4) + body size
+        buffer.putInt(4 + bodySize);
         buffer.putInt(correlationId);
-        // Body
-        buffer.putInt(0); // throttle_time_ms
-        buffer.put((byte) 2); // topics array length (1 topic + 1)
-        // Topic entry
-        buffer.putShort((short) 3); // error_code = 3 (UNKNOWN_TOPIC_OR_PARTITION)
-        // COMPACT_NULLABLE_STRING
-        buffer.put((byte) (topicLength + 1)); // varint length (simplified: assume < 128)
-        buffer.put(topicBytes); // topic name
-        // Topic ID (16 zeros)
-        buffer.put(new byte[16]);
-        // Partitions (empty compact array)
-        buffer.put((byte) 1); // length = 0 + 1
-        // Topic authorized operations
-        buffer.putInt(-1);
-        // Topic TAG_BUFFER
-        buffer.put((byte) 0);
-        // Overall TAG_BUFFER
-        buffer.put((byte) 0);
+        buffer.putShort((short) 3);  // error_code = 3 (UNKNOWN_TOPIC_OR_PARTITION)
+        buffer.put(topicField);      // fixed 96-byte topic field
+        buffer.put(topicId);         // 16 zero bytes for topic_id
+        buffer.putInt(0);            // partitions_count = 0
 
         return buffer.array();
     }
@@ -362,7 +354,6 @@ public class Main {
                 try {
                     header = readRequestHeader(clientInputStream);
                 } catch (IOException ioe) {
-                    // End of stream or error reading header.
                     break;
                 }
                 System.err.println("Received correlation_id: " + header.correlationId
@@ -378,8 +369,8 @@ public class Main {
                     }
                     buildApiVersionsResponse(header, clientOutputStream);
                 } else if (header.apiKey == 75) {
-                    // For DescribeTopicPartitions (v0), parse the request to get the topic name.
                     String topic = parseDescribeTopicPartitionsRequest(clientInputStream, remainingBytes);
+                    System.err.println("Parsed topic: " + topic);
                     byte[] response = buildDescribeTopicPartitionsResponse(header.correlationId, topic);
                     clientOutputStream.write(response);
                     clientOutputStream.flush();
