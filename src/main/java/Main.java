@@ -5,6 +5,7 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.io.UnsupportedEncodingException;
 
 /**
  * Main class for a simple Kafka clone that supports the ApiVersions request.
@@ -240,42 +241,134 @@ public class Main {
     }
 
     /**
-     * Handles an individual client connection.
-     * <p>
-     * This method processes multiple sequential requests from the same client.
-     * For each request, it reads the 12-byte header and discards any extra request data.
-     * Then, if the api_key is 18, it sends back an ApiVersions response.
-     * Otherwise, it logs that the api_key is unknown.
-     * The loop terminates when the client disconnects or an error occurs.
+     * Parses a DescribeTopicPartitions (v0) request body.
+     * The request body format is:
+     *  - topics: array of topics:
+     *       int16 topicsCount
+     *       For each topic:
+     *          string topic_name (2-byte length + UTF-8 bytes)
+     *          int32 partitionsCount
+     *          For each partition: int32 partition id (ignored)
+     * Returns the topic name of the first topic.
+     */
+    public static String parseDescribeTopicPartitionsRequest(InputStream in, int remaining) throws IOException {
+        // Read topics count (2 bytes)
+        byte[] topicsCountBytes = readNBytes(in, 2);
+        short topicsCount = ByteBuffer.wrap(topicsCountBytes).order(ByteOrder.BIG_ENDIAN).getShort();
+        if (topicsCount <= 0) return "";
+        // Parse first topic:
+        byte[] topicLengthBytes = readNBytes(in, 2);
+        short topicLength = ByteBuffer.wrap(topicLengthBytes).order(ByteOrder.BIG_ENDIAN).getShort();
+        byte[] topicNameBytes = readNBytes(in, topicLength);
+        String topic = new String(topicNameBytes, "UTF-8");
+        // Read partitions count for this topic:
+        byte[] partitionsCountBytes = readNBytes(in, 4);
+        int partitionsCount = ByteBuffer.wrap(partitionsCountBytes).order(ByteOrder.BIG_ENDIAN).getInt();
+        // Skip partition ids (each 4 bytes)
+        if (partitionsCount > 0) {
+            readNBytes(in, partitionsCount * 4);
+        }
+        // If additional topics exist, skip them.
+        for (int i = 1; i < topicsCount; i++) {
+            byte[] lenBytes = readNBytes(in, 2);
+            short len = ByteBuffer.wrap(lenBytes).order(ByteOrder.BIG_ENDIAN).getShort();
+            readNBytes(in, len);
+            byte[] pCountBytes = readNBytes(in, 4);
+            int pCount = ByteBuffer.wrap(pCountBytes).order(ByteOrder.BIG_ENDIAN).getInt();
+            if (pCount > 0) {
+                readNBytes(in, pCount * 4);
+            }
+        }
+        return topic;
+    }
+
+    /**
+     * Builds a DescribeTopicPartitions (v0) response for an unknown topic.
+     * The response body is:
+     *   - error_code: INT16 (2 bytes) = 3 (UNKNOWN_TOPIC_OR_PARTITION)
+     *   - topic_name: Kafka-encoded string (2-byte length + UTF-8 bytes)
+     *   - topic_id: 16 bytes of zeros (UUID all zeros)
+     *   - partitions: int32 count = 0 (empty array)
+     * The full response: message_length (4 bytes) + correlation_id (4 bytes) + body.
+     */
+    public static byte[] buildDescribeTopicPartitionsResponse(int correlationId, String topic) throws UnsupportedEncodingException {
+        byte[] topicBytes = topic.getBytes("UTF-8");
+        ByteBuffer topicBuffer = ByteBuffer.allocate(2 + topicBytes.length);
+        topicBuffer.order(ByteOrder.BIG_ENDIAN);
+        topicBuffer.putShort((short) topicBytes.length);
+        topicBuffer.put(topicBytes);
+        byte[] topicField = topicBuffer.array();
+
+        // Fixed topic_id (16 bytes of zeros)
+        byte[] topicId = new byte[16];
+
+        // Empty partitions array: int32 count = 0
+        ByteBuffer partitionsBuffer = ByteBuffer.allocate(4);
+        partitionsBuffer.order(ByteOrder.BIG_ENDIAN);
+        partitionsBuffer.putInt(0);
+        byte[] partitions = partitionsBuffer.array();
+
+        // Build body:
+        // error_code (2 bytes) + topic_field + topicId (16 bytes) + partitions (4 bytes)
+        int bodySize = 2 + topicField.length + topicId.length + partitions.length;
+        ByteBuffer bodyBuffer = ByteBuffer.allocate(bodySize);
+        bodyBuffer.order(ByteOrder.BIG_ENDIAN);
+        bodyBuffer.putShort((short) 3); // error_code = 3
+        bodyBuffer.put(topicField);
+        bodyBuffer.put(topicId);
+        bodyBuffer.put(partitions);
+        byte[] body = bodyBuffer.array();
+
+        // Full response: message_length (4 bytes) + correlation_id (4 bytes) + body.
+        int payloadSize = 4 + body.length;
+        ByteBuffer responseBuffer = ByteBuffer.allocate(4 + payloadSize);
+        responseBuffer.order(ByteOrder.BIG_ENDIAN);
+        responseBuffer.putInt(payloadSize);
+        responseBuffer.putInt(correlationId);
+        responseBuffer.put(body);
+        return responseBuffer.array();
+    }
+
+    /**
+     * Modified handleClient to support both ApiVersions (api_key 18) and
+     * DescribeTopicPartitions (api_key 75) requests.
      */
     public static void handleClient(Socket clientSocket) {
         try {
             InputStream clientInputStream = clientSocket.getInputStream();
             OutputStream clientOutputStream = clientSocket.getOutputStream();
             while (true) {
-                RequestHeader header = null;
+                RequestHeader header;
                 try {
                     header = readRequestHeader(clientInputStream);
                 } catch (IOException ioe) {
-                    // Likely end of stream (client closed connection)
+                    // End of stream or error reading header.
                     break;
                 }
-                System.err.println("Received correlation_id: " + header.correlationId +
-                        ", requested api_version: " + header.apiVersion);
+                System.err.println("Received correlation_id: " + header.correlationId
+                        + ", requested api_version: " + header.apiVersion
+                        + ", api_key: " + header.apiKey);
                 System.err.println("Received request size: " + header.requestSize);
 
-                // Calculate remaining bytes after header.
                 int remainingBytes = header.requestSize - 8;
-                if (remainingBytes > 0) {
-                    discardRemainingRequest(clientInputStream, remainingBytes);
-                    System.err.println("Discarded " + remainingBytes + " bytes from request.");
-                }
-
-                // Process ApiVersions requests (api_key == 18).
                 if (header.apiKey == 18) {
-                    buildApiVersionsRespone(header, clientOutputStream);
+                    if (remainingBytes > 0) {
+                        discardRemainingRequest(clientInputStream, remainingBytes);
+                        System.err.println("Discarded " + remainingBytes + " bytes from ApiVersions request.");
+                    }
+                    buildApiVersionsResponse(header, clientOutputStream);
+                } else if (header.apiKey == 75) {
+                    // For DescribeTopicPartitions (v0), parse the request to get the topic name.
+                    String topic = parseDescribeTopicPartitionsRequest(clientInputStream, remainingBytes);
+                    byte[] response = buildDescribeTopicPartitionsResponse(header.correlationId, topic);
+                    clientOutputStream.write(response);
+                    clientOutputStream.flush();
+                    System.err.println("Sent DescribeTopicPartitions response (" + response.length + " bytes)");
                 } else {
                     System.err.println("Unknown api_key " + header.apiKey + ", skipping.");
+                    if (remainingBytes > 0) {
+                        discardRemainingRequest(clientInputStream, remainingBytes);
+                    }
                 }
             }
         } catch (IOException e) {
