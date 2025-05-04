@@ -274,10 +274,8 @@ public class Main {
      * The full response: message_length (4 bytes) + correlation_id (4 bytes) + body.
      */
     public static byte[] buildDescribeTopicPartitionsResponse(int correlationId, String topic) throws UnsupportedEncodingException {
-        // Convert topic to UTF-8 bytes
+        // Convert topic to UTF-8 bytes and create fixed 115-byte topic field
         byte[] topicBytes = topic.getBytes("UTF-8");
-        
-        // Create a fixed 115-byte field for the topic name, padded with zeros
         byte[] topicField = new byte[115];
         System.arraycopy(topicBytes, 0, topicField, 0, Math.min(topicBytes.length, 115));
         
