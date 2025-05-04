@@ -10,7 +10,7 @@ import java.nio.ByteOrder;
  * Main class for a simple Kafka clone that supports the ApiVersions request.
  * <p>
  * The broker accepts connections on port 9092, reads a fixed 12-byte header 
- * (4 bytes message size (unused), 2 bytes api_key, 2 bytes api_version, 4 bytes correlation_id),
+ * (4 bytes message size (size of payload), 2 bytes api_key, 2 bytes api_version, 4 bytes correlation_id),
  * and sends a response in Kafka’s flexible (compact) message format.
  * <p>
  * For ApiVersions requests (api_key == 18):
@@ -58,9 +58,8 @@ public class Main {
 
     /**
      * Reads exactly n bytes from the InputStream.
-     * 
      * @param in the input stream.
-     * @param n  the number of bytes to read.
+     * @param n the number of bytes to read.
      * @return the read bytes.
      * @throws IOException if the connection is closed before n bytes are read.
      */
@@ -87,7 +86,6 @@ public class Main {
      *   <li>2 bytes: api_version (INT16)</li>
      *   <li>4 bytes: correlation_id (INT32)</li>
      * </ul>
-     * 
      * @param in the socket input stream.
      * @return the populated RequestHeader.
      * @throws IOException if reading fails.
@@ -111,63 +109,96 @@ public class Main {
     }
 
     /**
+     * Discards remaining bytes from the request.
+     * @param in the socket input stream.
+     * @param remaining the number of remaining bytes to discard.
+     */
+    public static void discardRemainingRequest(InputStream in, int remaining) throws IOException {
+        while (remaining > 0) {
+            byte[] buffer = new byte[Math.min(4096, remaining)];
+            int read = in.read(buffer);
+            if (read == -1)
+                break;
+            remaining -= read;
+        }
+    }
+
+    /**
+     * Builds an ApiVersions response.
+     * <p>
+     * This method checks the requested api_version and builds the appropriate response.
+     * If the requested version is unsupported, it sends an error response with error_code 35.
+     * Otherwise, it sends a success response with error_code 0 and one ApiVersion entry.
+     * @param header the request header containing api_key, api_version, and correlation_id.
+     * @param out the output stream to send the response to.
+     */
+    public static void buildApiVersionsRespone(RequestHeader header, OutputStream out) throws IOException {
+        if (header.apiVersion < 0 || header.apiVersion > 4) {
+            System.err.println("Unsupported api_version " + header.apiVersion + ", sending error response.");
+            byte[] errorResponse = buildErrorResponse(header.correlationId, (short) 35);
+            out.write(errorResponse);
+        } else {
+            System.err.println("Sending success response for api_version " + header.apiVersion);
+            byte[] successResponse = buildSuccessResponse(header.correlationId);
+            out.write(successResponse);
+        }
+        out.flush();
+    }
+
+    /**
      * Builds an error response when the requested API version is unsupported.
      * <p>
-     * Error response body layout (8 bytes):
+     * Constructs a response that contains:
      * <ul>
      *   <li>error_code: INT16 (2 bytes)</li>
-     *   <li>compact array: 1 byte (0 means no elements)</li>
-     *   <li>throttle_time_ms: INT32 (4 bytes, 0)</li>
+     *   <li>compact array: 1 byte (0, meaning no elements) </li>
+     *   <li>throttle_time_ms: INT32 (4 bytes, value 0)</li>
      *   <li>response TAG_BUFFER: 1 byte (0x00)</li>
      * </ul>
-     * The overall message length (excluding the 4-byte length field) is
-     * 4 (correlation_id) + 8 (body) = 12 bytes.
-     * 
+     * Overall, the body is 8 bytes; prepended by correlation_id (4 bytes) gives 12.
+     * The overall response includes a 4-byte message_length (which is 12).
      * @param correlationId the correlation id from the request.
-     * @param errorCode     the error code to return.
+     * @param errorCode the error code (e.g. 35).
      * @return the complete error response bytes.
      */
     public static byte[] buildErrorResponse(int correlationId, short errorCode) {
-        // Total response = 4 (message_length field) + 4 (correlation_id) + 8 (body) = 16 bytes.
         ByteBuffer buffer = ByteBuffer.allocate(16);
         buffer.order(ByteOrder.BIG_ENDIAN);
-        buffer.putInt(4 + 8); // message_length = 12 bytes (correlation_id + body)
+        buffer.putInt(4 + 8); // message_length = 12 (correlation_id + body)
         buffer.putInt(correlationId);
         buffer.putShort(errorCode);
         buffer.put((byte) 0); // compact array: no elements
         buffer.putInt(0);     // throttle_time_ms
-        buffer.put((byte) 0); // empty response TAG_BUFFER
+        buffer.put((byte) 0); // TAG_BUFFER
         return buffer.array();
     }
 
     /**
      * Builds a successful API Versions response.
      * <p>
-     * Successful response body layout (15 bytes):
+     * Constructs a response with:
      * <ul>
      *   <li>error_code: INT16 (2 bytes, value 0)</li>
-     *   <li>api_keys: compact array length (1 byte, value = 2 for one element + 1)</li>
-     *   <li>One ApiVersion entry (7 bytes):
-     *     <ul>
-     *       <li>api_key: INT16 (2 bytes, value 18)</li>
-     *       <li>min_version: INT16 (2 bytes, value 0)</li>
-     *       <li>max_version: INT16 (2 bytes, value 4)</li>
-     *       <li>entry TAG_BUFFER: 1 byte (0x00)</li>
-     *     </ul>
+     *   <li>api_keys: compact array length: 1 byte (value 2, meaning one element + 1)</li>
+     *   <li>An ApiVersion entry (7 bytes) containing:
+     *        api_key: INT16 (value 18),
+     *        min_version: INT16 (value 0),
+     *        max_version: INT16 (value 4),
+     *        entry TAG_BUFFER: 1 byte (0x00)
      *   </li>
-     *   <li>throttle_time_ms: INT32 (4 bytes, value 0)</li>
-     *   <li>response TAG_BUFFER: 1 byte (0x00)</li>
+     *   <li>throttle_time_ms: INT32 (value 0)</li>
+     *   <li>overall TAG_BUFFER: 1 byte (0x00)</li>
      * </ul>
-     * Overall, the message (after the 4-byte message_length field) comprises:
-     * 4 (correlation_id) + 15 (body) = 19 bytes. Thus, total response size is 23 bytes.
-     * 
+     * Overall the body is 15 bytes; with correlation_id (4 bytes) it totals 19,
+     * and with the message_length field (4 bytes) the complete response is 23 bytes.
      * @param correlationId the correlation id from the request.
      * @return the complete success response bytes.
      */
     public static byte[] buildSuccessResponse(int correlationId) {
         ByteBuffer buffer = ByteBuffer.allocate(23);
         buffer.order(ByteOrder.BIG_ENDIAN);
-        buffer.putInt(4 + 15); // message_length = 19 bytes (correlation_id + body)
+        int bodySize = 15; // as specified
+        buffer.putInt(4 + bodySize); // message_length = correlation_id (4) + body (15) = 19 bytes
         buffer.putInt(correlationId);
         buffer.putShort((short) 0);   // error_code = 0
         buffer.put((byte) 2);         // compact array length = 2 (one element + 1)
@@ -182,54 +213,60 @@ public class Main {
 
     /**
      * Handles an individual client connection.
+     * <p>
+     * This method processes multiple sequential requests from the same client.
+     * For each request, it reads the 12-byte header and discards any extra request data.
+     * Then, if the api_key is 18, it sends back an ApiVersions response.
+     * Otherwise, it logs that the api_key is unknown.
+     * The loop terminates when the client disconnects or an error occurs.
      */
-    public static void handleClient(Socket clientSocket) throws IOException {
-        InputStream in = clientSocket.getInputStream();
-        OutputStream out = clientSocket.getOutputStream();
-
-        // Loop processing sequential requests on the same connection.
-        while (true) {
-            RequestHeader header = null;
-            try {
-                header = readRequestHeader(in);
-            } catch (IOException ioe) {
-                // Likely end of stream (client closed connection).
-                break;
-            }
-            System.err.println("Received correlation_id: " + header.correlationId +
-                    ", requested api_version: " + header.apiVersion);
-            System.err.println("Received request size: " + header.requestSize);
-
-            // Discard remaining request bytes.
-            // The request_size field specifies size of data after itself,
-            // we've read 8 bytes of header, so remaining = request_size - 8
-            int remainingBytes = header.requestSize - 8;
-            while (remainingBytes > 0) {
-                byte[] discardBuffer = new byte[Math.min(4096, remainingBytes)];
-                int read = in.read(discardBuffer);
-                if (read == -1)
+    public static void handleClient(Socket clientSocket) {
+        try {
+            InputStream clientInputStream = clientSocket.getInputStream();
+            OutputStream clientOutputStream = clientSocket.getOutputStream();
+            while (true) {
+                RequestHeader header = null;
+                try {
+                    header = readRequestHeader(clientInputStream);
+                } catch (IOException ioe) {
+                    // Likely end of stream (client closed connection)
                     break;
-                remainingBytes -= read;
-            }
-
-            // Process ApiVersions request.
-            if (header.apiKey == 18) {
-                if (header.apiVersion < 0 || header.apiVersion > 4) {
-                    out.write(buildErrorResponse(header.correlationId, (short) 35));
-                } else {
-                    out.write(buildSuccessResponse(header.correlationId));
                 }
-                out.flush();
-            } else {
-                System.err.println("Unknown api_key " + header.apiKey + ", skipping.");
+                System.err.println("Received correlation_id: " + header.correlationId +
+                        ", requested api_version: " + header.apiVersion);
+                System.err.println("Received request size: " + header.requestSize);
+
+                // Calculate remaining bytes after header.
+                int remainingBytes = header.requestSize - 8;
+                if (remainingBytes > 0) {
+                    discardRemainingRequest(in, remainingBytes);
+                }
+
+                // Process ApiVersions requests (api_key == 18).
+                if (header.apiKey == 18) {
+                    buildApiVersionsRespone(header, clientOutputStream);
+                } else {
+                    System.err.println("Unknown api_key " + header.apiKey + ", skipping.");
+                }
             }
+        } catch (IOException e) {
+            System.err.println("Error handling client: " + e.getMessage());
+        } finally {
+            try {
+                clientSocket.shutdownOutput();
+            } catch (IOException e) { }
+            try {
+                clientSocket.close();
+            } catch (IOException e) { }
+            System.err.println("Client connection closed.");
         }
     }
 
     /**
-     * Runs the server on the specified port. The server listens for incoming 
-     * client connections and dispatches them for handling.
-     * 
+     * Runs the server on the specified port.
+     * <p>
+     * This method continuously accepts new client connections.
+     * For each connection, a new thread is spawned to handle sequential requests from that client.
      * @param port the port to listen on.
      * @throws IOException if an I/O error occurs.
      */
@@ -241,11 +278,8 @@ public class Main {
             while (true) {
                 Socket clientSocket = serverSocket.accept();
                 System.err.println("Connection from " + clientSocket.getRemoteSocketAddress() + " has been established!");
-                try {
-                    handleClient(clientSocket);
-                } finally {
-                    clientSocket.close();
-                }
+                // Spawn a new thread to handle this client concurrently.
+                new Thread(() -> handleClient(clientSocket)).start();
             }
         } finally {
             serverSocket.close();
@@ -254,13 +288,21 @@ public class Main {
 
     /**
      * Main entry point.
-     * 
-     * @param args command-line arguments (not used).
+     * @param args command-line arguments (optional port number).
      */
     public static void main(String[] args) {
+        int port = 9092;
+        if (args.length > 0) {
+            try {
+                port = Integer.parseInt(args[0]);
+            } catch (NumberFormatException e) {
+                System.err.println("Invalid port number, using default port 9092.");
+            }
+        }
+        System.err.println("Starting server on port " + port);
         System.err.println("Logs from your program will appear here!");
         try {
-            runServer(9092);
+            runServer(port);
         } catch (IOException e) {
             System.err.println("IOException: " + e.getMessage());
         }
