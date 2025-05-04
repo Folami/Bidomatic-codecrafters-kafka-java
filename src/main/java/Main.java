@@ -277,7 +277,7 @@ public class Main {
             String topicName = null;
             try {
                 topicName = new String(topicNameBytes, "UTF-8");
-            } catch (java.nio.charset.MalformedInputException | java.nio.charset.CharacterCodingException e) {
+            } catch (java.nio.charset.CharacterCodingException e) {
                 System.err.println("Invalid UTF-8 topic name at index " + i + ", skipping topic");
                 // Skip this topic, but continue processing if not the first
                 if (firstTopicName == null) {
