@@ -285,32 +285,31 @@ public class Main {
      * Builds a DescribeTopicPartitions (v0) response for an unknown topic.
      * The response body is:
      *   - error_code: INT16 (2 bytes) = 3 (UNKNOWN_TOPIC_OR_PARTITION)
-     *   - topic_name: fixed 96-byte field (UTF-8 bytes padded with zeros)
+     *   - topic_name: fixed 115-byte field (UTF-8 bytes padded with zeros)
      *   - topic_id: 16 bytes of zeros (UUID all zeros)
      *   - partitions: int32 count = 0 (empty array)
      */
     public static byte[] buildDescribeTopicPartitionsResponse(int correlationId, String topic) throws IOException {
         // Convert topic to UTF-8 bytes
-        byte[] topicBytes;
-        try {
-            topicBytes = topic.getBytes("UTF-8");
-        } catch (UnsupportedEncodingException e) {
-            throw new IOException("UTF-8 encoding not supported", e);
-        }
-        // Create a fixed 96-byte field for the topic name, padded with zeros
-        byte[] topicField = new byte[96];
-        System.arraycopy(topicBytes, 0, topicField, 0, Math.min(topicBytes.length, 96));
+        byte[] topicBytes = topic.getBytes("UTF-8");
+        
+        // Create a fixed 115-byte field for the topic name, padded with zeros
+        byte[] topicField = new byte[115];
+        System.arraycopy(topicBytes, 0, topicField, 0, Math.min(topicBytes.length, 115));
+        
         // Fixed topic_id (16 bytes of zeros)
         byte[] topicId = new byte[16];
-        // Body size: error_code (2) + topic_field (96) + topic_id (16) + partitions_count (4)
-        int bodySize = 2 + 96 + 16 + 4;
+        
+        // Body size: error_code (2) + topic_field (115) + topic_id (16) + partitions_count (4)
+        int bodySize = 2 + 115 + 16 + 4;
         ByteBuffer buffer = ByteBuffer.allocate(4 + 4 + bodySize);
         buffer.order(ByteOrder.BIG_ENDIAN);
+        
         // message_length = correlation_id (4) + body size
         buffer.putInt(4 + bodySize);
         buffer.putInt(correlationId);
         buffer.putShort((short) 3);  // error_code = 3 (UNKNOWN_TOPIC_OR_PARTITION)
-        buffer.put(topicField);      // fixed 96-byte topic field
+        buffer.put(topicField);      // fixed 115-byte topic field
         buffer.put(topicId);         // 16 zero bytes for topic_id
         buffer.putInt(0);            // partitions_count = 0
 
