@@ -254,90 +254,31 @@ public class Main {
      * Returns the topic name of the first valid topic, or null if none found.
      */
     public static String parseDescribeTopicPartitionsRequest(InputStream in, int remaining) throws IOException {
-        // Read topics count (INT16)
+        // Ensure we have at least 2 bytes for the string's length
         if (remaining < 2) {
-            throw new IOException("Not enough bytes for topics count: " + remaining);
+            throw new IOException("Not enough bytes for topic name length: " + remaining);
         }
-        byte[] topicsCountBytes = readNBytes(in, 2);
-        short topicsCount = ByteBuffer.wrap(topicsCountBytes).order(ByteOrder.BIG_ENDIAN).getShort();
-        int totalBytesRead = 2;
-        
-        // Log for debugging
-        System.err.println("Parsing request with topics_count=" + topicsCount + ", remaining=" + remaining);
-        
-        // Allow topics_count = 0 as per protocol
-        if (topicsCount < 0) {
-            throw new IOException("Invalid topics count: " + topicsCount);
+        // Read the 2-byte length field
+        byte[] lengthBytes = readNBytes(in, 2);
+        int bytesRead = 2;
+        short strLen = ByteBuffer.wrap(lengthBytes).order(ByteOrder.BIG_ENDIAN).getShort();
+        String topicName;
+        if (strLen < 0) {
+            // Handle a null topic name as empty string
+            topicName = "";
+        } else {
+            if (remaining - bytesRead < strLen) {
+                throw new IOException("Not enough bytes for topic name: expected " + strLen + ", remaining " + (remaining - bytesRead));
+            }
+            byte[] nameBytes = readNBytes(in, strLen);
+            bytesRead += strLen;
+            topicName = new String(nameBytes, StandardCharsets.UTF_8);
         }
-        String firstTopicName = null;
-        // Process each topic
-        for (int i = 0; i < topicsCount && totalBytesRead < remaining; i++) {
-            // Read topic name length (INT16)
-            if (remaining - totalBytesRead < 2) {
-                System.err.println("Not enough bytes for topic name length at index " + i + ", remaining=" + (remaining - totalBytesRead));
-                break;
-            }
-            byte[] topicLengthBytes = readNBytes(in, 2);
-            short topicLength = ByteBuffer.wrap(topicLengthBytes).order(ByteOrder.BIG_ENDIAN).getShort();
-            totalBytesRead += 2;
-            
-            // Validate topic length
-            if (topicLength < 0 || remaining - totalBytesRead < topicLength) {
-                System.err.println("Invalid topic name length at index " + i + ": length=" + topicLength + ", remaining=" + (remaining - totalBytesRead));
-                break;
-            }
-            
-            // Read topic name
-            byte[] topicNameBytes = readNBytes(in, topicLength);
-            totalBytesRead += topicLength;
-            String topicName = null;
-            try {
-                topicName = new String(topicNameBytes, StandardCharsets.UTF_8);
-                System.err.println("Parsed topic name at index " + i + ": " + topicName);
-            } catch (Exception e) {
-                System.err.println("Invalid UTF-8 topic name at index " + i + ": " + e.getMessage());
-                continue;
-            }
-            
-            // Read partitions count (INT32)
-            if (remaining - totalBytesRead < 4) {
-                System.err.println("Not enough bytes for partitions count at index " + i + ", remaining=" + (remaining - totalBytesRead));
-                break;
-            }
-            byte[] partitionsCountBytes = readNBytes(in, 4);
-            int partitionsCount = ByteBuffer.wrap(partitionsCountBytes).order(ByteOrder.BIG_ENDIAN).getInt();
-            totalBytesRead += 4;
-            
-            if (partitionsCount < 0) {
-                System.err.println("Invalid partitions count at index " + i + ": " + partitionsCount);
-                break;
-            }
-            
-            // Read partition IDs (INT32 each)
-            if (remaining - totalBytesRead < partitionsCount * 4) {
-                System.err.println("Not enough bytes for partition IDs at index " + i + ", required=" + (partitionsCount * 4) + ", remaining=" + (remaining - totalBytesRead));
-                break;
-            }
-            for (int j = 0; j < partitionsCount; j++) {
-                readNBytes(in, 4); // Discard partition ID
-                totalBytesRead += 4;
-            }
-            
-            // Store the first valid topic name
-            if (firstTopicName == null && topicName != null) {
-                firstTopicName = topicName;
-            }
+        // Discard any extra bytes in the body
+        if (remaining > bytesRead) {
+            discardRemainingRequest(in, remaining - bytesRead);
         }
-        
-        // Discard any remaining bytes
-        if (remaining > totalBytesRead) {
-            System.err.println("Discarding " + (remaining - totalBytesRead) + " remaining bytes");
-            discardRemainingRequest(in, remaining - totalBytesRead);
-        } else if (remaining < totalBytesRead) {
-            throw new IOException("Request size mismatch: expected " + remaining + " bytes, read " + totalBytesRead);
-        }
-        
-        return firstTopicName; // May be null if no valid topic found
+        return topicName;
     }
 
     /**
