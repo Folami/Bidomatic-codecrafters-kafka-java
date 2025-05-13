@@ -6,7 +6,6 @@ import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
-import java.io.UnsupportedEncodingException;
 
 /**
  * Main class for a simple Kafka clone that supports the ApiVersions request.
@@ -58,18 +57,17 @@ public class Main {
     /**
      * Helper class to hold the incoming request header.
      */
-    public static class RequestHeader {
-        public int requestSize;
+    public static class FullRequestHeader {
+        public int messageSize; // The total size of the message *following* the message_size field itself.
         public short apiKey;
         public short apiVersion;
         public int correlationId;
+        public String clientId;
+        public int clientIdFieldLengthBytes; // Bytes consumed by client_id: 2 for len + N for data, or 2 if null/empty.
+        public int bodySize; // Calculated size of the actual request body payload (messageSize - commonHeaderParts - clientIdFieldLength)
 
-        public RequestHeader(int requestSize, short apiKey, short apiVersion, int correlationId) {
-            this.requestSize = requestSize;
-            this.apiKey = apiKey;
-            this.apiVersion = apiVersion;
-            this.correlationId = correlationId;
-        }
+        // Default constructor
+        public FullRequestHeader() {}
     }
 
     /**
@@ -93,35 +91,53 @@ public class Main {
     }
 
     /**
-     * Reads the fixed 12-byte header from the socket.
+     * Reads the full Kafka request header from the socket.
      * <p>
      * Header layout:
      * <ul>
-     *   <li>4 bytes: request message size (size of data following this field)</li>
+     *   <li>4 bytes: message_size (size of data following this field)</li>
      *   <li>2 bytes: api_key (INT16)</li>
      *   <li>2 bytes: api_version (INT16)</li>
      *   <li>4 bytes: correlation_id (INT32)</li>
+     *   <li>client_id: STRING (INT16 length + UTF-8 bytes)</li>
      * </ul>
      * @param in the socket input stream.
-     * @return the populated RequestHeader.
+     * @return the populated FullRequestHeader.
      * @throws IOException if reading fails.
      */
-    public static RequestHeader readRequestHeader(InputStream in) throws IOException {
-        // Read size field (4 bytes)
-        byte[] sizeBytes = readNBytes(in, 4);
-        ByteBuffer sizeBuffer = ByteBuffer.wrap(sizeBytes);
-        sizeBuffer.order(ByteOrder.BIG_ENDIAN);
-        int messageSize = sizeBuffer.getInt();
+    public static FullRequestHeader readFullRequestHeader(InputStream in) throws IOException {
+        FullRequestHeader frh = new FullRequestHeader();
 
-        // Read the rest of the header (8 bytes)
-        byte[] headerBytes = readNBytes(in, 8);
-        ByteBuffer headerBuffer = ByteBuffer.wrap(headerBytes);
-        headerBuffer.order(ByteOrder.BIG_ENDIAN);
-        short apiKey = headerBuffer.getShort();
-        short apiVersion = headerBuffer.getShort();
-        int correlationId = headerBuffer.getInt();
+        byte[] messageSizeBytes = readNBytes(in, 4);
+        frh.messageSize = ByteBuffer.wrap(messageSizeBytes).order(ByteOrder.BIG_ENDIAN).getInt();
 
-        return new RequestHeader(messageSize, apiKey, apiVersion, correlationId);
+        byte[] commonHeaderPartsBytes = readNBytes(in, 8); // apiKey, apiVersion, correlationId
+        ByteBuffer commonHeaderBuffer = ByteBuffer.wrap(commonHeaderPartsBytes).order(ByteOrder.BIG_ENDIAN);
+        frh.apiKey = commonHeaderBuffer.getShort();
+        frh.apiVersion = commonHeaderBuffer.getShort();
+        frh.correlationId = commonHeaderBuffer.getInt();
+
+        // Read clientId (Kafka STRING)
+        byte[] clientIdLenBytes = readNBytes(in, 2);
+        short clientIdLenRaw = ByteBuffer.wrap(clientIdLenBytes).order(ByteOrder.BIG_ENDIAN).getShort();
+
+        if (clientIdLenRaw == -1) { // Null string
+            frh.clientId = null;
+            frh.clientIdFieldLengthBytes = 2;
+        } else if (clientIdLenRaw < 0) { // Invalid length for a non-null string
+            System.err.println("Warning: Invalid Client ID length: " + clientIdLenRaw + ". Treating as empty.");
+            frh.clientId = ""; // Treat as empty, though this is a protocol violation.
+            frh.clientIdFieldLengthBytes = 2; // Consumed the length field
+        } else { // Valid length (>=0)
+            byte[] clientIdValueBytes = readNBytes(in, clientIdLenRaw);
+            frh.clientId = new String(clientIdValueBytes, StandardCharsets.UTF_8);
+            frh.clientIdFieldLengthBytes = 2 + clientIdLenRaw;
+        }
+
+        int commonHeaderSize = 8; // apiKey (2) + apiVersion (2) + correlationId (4)
+        frh.bodySize = frh.messageSize - commonHeaderSize - frh.clientIdFieldLengthBytes;
+
+        return frh;
     }
 
     /**
@@ -146,17 +162,17 @@ public class Main {
      * This method checks the requested api_version and builds the appropriate response.
      * If the requested version is unsupported, it sends an error response with error_code 35.
      * Otherwise, it sends a success response with error_code 0 and one ApiVersion entry.
-     * @param header the request header containing api_key, api_version, and correlation_id.
+     * @param fullHeader the full request header.
      * @param out the output stream to send the response to.
      */
-    public static void buildApiVersionsResponse(RequestHeader header, OutputStream out) throws IOException {
-        if (header.apiVersion < 0 || header.apiVersion > 4) {
-            System.err.println("Unsupported api_version " + header.apiVersion + ", sending error response.");
-            byte[] errorResponse = buildErrorResponse(header.correlationId, (short) 35);
+    public static void buildApiVersionsResponse(FullRequestHeader fullHeader, OutputStream out) throws IOException {
+        if (fullHeader.apiVersion < 0 || fullHeader.apiVersion > 4) {
+            System.err.println("Unsupported api_version " + fullHeader.apiVersion + ", sending error response.");
+            byte[] errorResponse = buildErrorResponse(fullHeader.correlationId, (short) 35);
             out.write(errorResponse);
         } else {
-            System.err.println("Sending success response for api_version " + header.apiVersion);
-            byte[] successResponse = buildSuccessResponse(header.correlationId);
+            System.err.println("Sending success response for api_version " + fullHeader.apiVersion);
+            byte[] successResponse = buildSuccessResponse(fullHeader.correlationId);
             out.write(successResponse);
         }
         out.flush();
