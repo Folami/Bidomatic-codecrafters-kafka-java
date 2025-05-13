@@ -193,28 +193,6 @@ public class Main {
     }
 
     /**
-     * Builds an ApiVersions response.
-     * <p>
-     * This method checks the requested api_version and builds the appropriate response.
-     * If the requested version is unsupported, it sends an error response with error_code 35.
-     * Otherwise, it sends a success response with error_code 0 and one ApiVersion entry.
-     * @param fullHeader the full request header.
-     * @param out the output stream to send the response to.
-     */
-    public static void buildApiVersionsResponse(FullRequestHeader fullHeader, OutputStream out) throws IOException {
-        if (fullHeader.apiVersion < 0 || fullHeader.apiVersion > 4) {
-            System.err.println("Unsupported api_version " + fullHeader.apiVersion + ", sending error response.");
-            byte[] errorResponse = buildErrorResponse(fullHeader.correlationId, (short) 35);
-            out.write(errorResponse);
-        } else {
-            System.err.println("Sending success response for api_version " + fullHeader.apiVersion);
-            byte[] successResponse = buildSuccessResponse(fullHeader.correlationId);
-            out.write(successResponse);
-        }
-        out.flush();
-    }
-
-    /**
      * Builds an API Versions response, mimicking the Python build_api_versions_response.
      * Handles both success and error (unsupported version) cases.
      * The response includes a flexible header (correlation_id + tag_buffer).
