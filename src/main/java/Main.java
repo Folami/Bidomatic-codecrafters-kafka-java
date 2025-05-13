@@ -286,7 +286,7 @@ public class Main {
     public static String parseDescribeTopicPartitionsRequest(InputStream in, int remaining) throws IOException {
         int bytesConsumed = 0;
         String firstTopicName = null;
-
+    
         // Read topicsCount (INT16)
         if (remaining < 2) {
             System.err.println("P_DTP_R: Body too small for topicsCount (" + remaining + " bytes).");
@@ -296,85 +296,82 @@ public class Main {
         byte[] topicsCountBytes = readNBytes(in, 2);
         bytesConsumed += 2;
         short topicsCount = ByteBuffer.wrap(topicsCountBytes).order(ByteOrder.BIG_ENDIAN).getShort();
-
-        if (topicsCount < 0) { // Invalid count
+    
+        if (topicsCount < 0) {
             System.err.println("P_DTP_R: Invalid topics_count " + topicsCount + ".");
             if (remaining - bytesConsumed > 0) discardRemainingRequest(in, remaining - bytesConsumed);
             return "";
         }
-
+    
         System.err.println("P_DTP_R: Expecting " + topicsCount + " topics.");
-
+    
         for (int i = 0; i < topicsCount; i++) {
             // Parse Topic Name (STRING)
-            if (remaining - bytesConsumed < 2) { // Not enough for name length field
+            if (remaining - bytesConsumed < 2) {
                 System.err.println("P_DTP_R: Not enough data for topic_name length (topic " + (i+1) + "). Remaining: " + (remaining - bytesConsumed));
-                break; // Malformed request
+                break;
             }
             byte[] nameLenBytes = readNBytes(in, 2);
             bytesConsumed += 2;
             short nameLen = ByteBuffer.wrap(nameLenBytes).order(ByteOrder.BIG_ENDIAN).getShort();
-
+    
             String currentTopicNameStr = "";
-            if (nameLen < 0) { // Kafka STRING length must be >= 0
-                 System.err.println("P_DTP_R: Invalid topic_name length " + nameLen + " for topic " + (i+1) + ". STRING requires >= 0.");
-                 // Malformed. Treat as empty name for this topic.
-            } else if (nameLen > 0) { // Only read payload if length > 0
+            if (nameLen < 0) {
+                System.err.println("P_DTP_R: Invalid topic_name length " + nameLen + " for topic " + (i+1) + ". STRING requires >= 0.");
+            } else if (nameLen > 0) {
                 if (nameLen > remaining - bytesConsumed) {
-                    System.err.println("P_DTP_R: Stated topic_name length " + nameLen + " for topic " + (i+1) + " exceeds remaining body bytes " + (remaining - bytesConsumed) + ". Malformed.");
-                    if (firstTopicName == null) firstTopicName = ""; // Ensure it's set if this was the first
-                    break; // Stop parsing topics, rest of body will be discarded.
+                    System.err.println("P_DTP_R: Stated topic_name length " + nameLen + " for topic " + (i+1)(array index out of bounds)
+    + " exceeds remaining body bytes " + (remaining - bytesConsumed) + ". Malformed.");
+                    if (firstTopicName == null) firstTopicName = "";
+                    break;
                 }
                 byte[] namePayloadBytes = readNBytes(in, nameLen);
                 bytesConsumed += nameLen;
                 try {
                     currentTopicNameStr = new String(namePayloadBytes, StandardCharsets.UTF_8);
-                } catch (Exception e) { // Catch any decoding issues
+                } catch (Exception e) {
                     System.err.println("P_DTP_R: Topic_name for topic " + (i+1) + " had decode error. Treating as empty.");
-                    // currentTopicNameStr remains ""
                 }
             }
-            // If nameLen == 0, currentTopicNameStr is already ""
-
+    
             if (firstTopicName == null) {
                 firstTopicName = currentTopicNameStr;
             }
-
-            // Parse Partitions for this topic (INT32 count + INT32 array)
-            if (remaining - bytesConsumed < 4) { // Not enough for partitionsCount field
+    
+            // Parse Partitions for this topic
+            if (remaining - bytesConsumed < 4) {
                 System.err.println("P_DTP_R: Not enough data for partitionsCount (topic " + (i+1) + "). Remaining: " + (remaining - bytesConsumed));
-                break; // Malformed request
+                break;
             }
             byte[] partitionsCountBytes = readNBytes(in, 4);
             bytesConsumed += 4;
             int partitionsCount = ByteBuffer.wrap(partitionsCountBytes).order(ByteOrder.BIG_ENDIAN).getInt();
-
+    
             if (partitionsCount < 0) {
-                 System.err.println("P_DTP_R: Invalid partitions_count " + partitionsCount + " for topic " + (i+1) + ".");
-                 break; // Malformed. Stop parsing topics.
+                System.err.println("P_DTP_R: Invalid partitions_count " + partitionsCount + " for topic " + (i+1) + ".");
+                break;
             }
-
+    
             int bytesForPartitionIds = partitionsCount * 4;
-            if (bytesForPartitionIds > 0) { // Only try to read if count > 0
-                 if (bytesForPartitionIds > remaining - bytesConsumed) {
-                     System.err.println("P_DTP_R: Stated " + bytesForPartitionIds + " bytes for partition IDs (topic " + (i+1) + ") exceeds remaining body bytes " + (remaining - bytesConsumed) + ". Malformed.");
-                     break; // Malformed. Stop parsing topics.
-                 }
-                 // We just discard partition IDs as per problem spec for now
-                 discardRemainingRequest(in, bytesForPartitionIds);
-                 bytesConsumed += bytesForPartitionIds;
+            if (bytesForPartitionIds > 0) {
+                if (bytesForPartitionIds > remaining - bytesConsumed) {
+                    System.err.println("P_DTP_R: Stated " + bytesForPartitionIds + " bytes for partition IDs (topic " + (i+1) + ") exceeds remaining body bytes " + (remaining - bytesConsumed) + ". Malformed.");
+                    break;
+                }
+                discardRemainingRequest(in, bytesForPartitionIds);
+                bytesConsumed += bytesForPartitionIds;
             }
         }
-
-        // Consume any remaining bytes specified by the initial 'remaining' size, if not fully parsed.
+    
+        // Consume any remaining bytes
         int unparsedBytes = remaining - bytesConsumed;
         if (unparsedBytes > 0) {
             System.err.println("P_DTP_R: Discarding " + unparsedBytes + " unparsed bytes from request body.");
             discardRemainingRequest(in, unparsedBytes);
         } else if (unparsedBytes < 0) {
-             System.err.println("P_DTP_R: WARNING - Consumed " + bytesConsumed + " bytes, but initial remaining was " + remaining + ".");
+            System.err.println("P_DTP_R: WARNING - Consumed " + bytesConsumed + " bytes, but initial remaining was " + remaining + ".");
         }
-
+    
         String parsedTopicName = (firstTopicName != null) ? firstTopicName : "";
         System.err.println("P_DTP_R: Parsed first topic='" + parsedTopicName + "'");
         return parsedTopicName;
@@ -393,31 +390,25 @@ public class Main {
             topic = ""; // Default to empty string if null
         }
         System.err.println("build_describe_topic_partitions_response: topic_name='" + topic + "' for response.");
-
-        byte[] error_code_bytes = ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 3).array();
-        byte[] topic_name_encoded_as_kafka_string = encodeKafkaString(topic);
-
-        // Fixed topic_id: 16 bytes of zeros (UUID 00000000-0000-0000-0000-000000000000)
-        byte[] topicId = new byte[16];
-        byte[] partitions_count_bytes = ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN).putInt(0).array(); // partitions_count = 0
-
+    
+        byte[] errorCodeBytes = ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 3).array(); // UNKNOWN_TOPIC_OR_PARTITION
+        byte[] topicNameEncoded = encodeKafkaString(topic); // Properly encode as Kafka STRING
+        byte[] topicId = new byte[16]; // 16 zeros (nil UUID)
+        byte[] partitionsCountBytes = ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN).putInt(0).array(); // partitions_count = 0
+    
         byte[] responseBody = concatenateByteArrays(
-            error_code_bytes,
-            topic_name_encoded_as_kafka_string,
+            errorCodeBytes,
+            topicNameEncoded,
             topicId,
-            partitions_count_bytes
+            partitionsCountBytes
         );
-
-        // Response Header for v0 is just the Correlation ID (4 bytes)
+    
         byte[] responseHeader = ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN).putInt(correlationId).array();
-
         int messageSize = responseHeader.length + responseBody.length;
-
+    
         ByteBuffer buffer = ByteBuffer.allocate(4 + messageSize);
         buffer.order(ByteOrder.BIG_ENDIAN);
-
-        // message_length = correlation_id (4) + body size
-        buffer.putInt(messageSize);
+        buffer.putInt(messageSize); // message_length
         buffer.put(responseHeader);
         buffer.put(responseBody);
         return buffer.array();
@@ -458,9 +449,9 @@ public class Main {
                 } catch (IOException ioe) {
                     System.err.println("IOException while reading header, closing connection: " + ioe.getMessage());
                     break;
-                } catch (Exception e) { // Catch other potential errors during header parsing
+                } catch (Exception e) {
                     System.err.println("Error reading full request header: " + e.getMessage());
-                    break; 
+                    break;
                 }
                 System.err.println("Received correlation_id: " + fullHeader.correlationId
                         + ", requested api_version: " + fullHeader.apiVersion
@@ -468,28 +459,28 @@ public class Main {
                 System.err.println("Received request messageSize (payload after size field): " + fullHeader.messageSize);
                 System.err.println("Client ID: '" + fullHeader.clientId + "', Client ID field length: " + fullHeader.clientIdFieldLengthBytes);
                 System.err.println("Calculated request bodySize: " + fullHeader.bodySize);
-
+    
                 if (fullHeader.bodySize < 0) {
                     System.err.println("Error: Calculated negative bodySize (" + fullHeader.bodySize + "). Protocol error or parsing issue.");
-                    break; // Critical error, close connection
+                    break;
                 }
-
-                if (fullHeader.apiKey == 18) { // ApiVersions
+    
+                if (fullHeader.apiKey == 18) {
                     if (fullHeader.bodySize > 0) {
                         discardRemainingRequest(clientInputStream, fullHeader.bodySize);
                         System.err.println("Discarded " + fullHeader.bodySize + " bytes from ApiVersions request body.");
                     }
                     buildApiVersionsResponse(fullHeader, clientOutputStream);
-                } else if (fullHeader.apiKey == 75) { // DescribeTopicPartitions
-                    String topic = null;
+                } else if (fullHeader.apiKey == 75) {
+                    String topic;
                     try {
                         topic = parseDescribeTopicPartitionsRequest(clientInputStream, fullHeader.bodySize);
                         System.err.println("Parsed topic: " + topic);
                     } catch (IOException e) {
                         System.err.println("Error parsing DescribeTopicPartitions request: " + e.getMessage());
-                        topic = "unknown"; // Fallback, but ideally send an error response
-                    } // topic will be "" if parsing failed or topic name was empty
-                    byte[] response = buildDescribeTopicPartitionsResponse(fullHeader.correlationId, topic); // Pass the parsed topic name
+                        topic = ""; // Use empty string on error, consistent with parsing logic
+                    }
+                    byte[] response = buildDescribeTopicPartitionsResponse(fullHeader.correlationId, topic);
                     clientOutputStream.write(response);
                     clientOutputStream.flush();
                     System.err.println("Sent DescribeTopicPartitions response (" + response.length + " bytes)");
@@ -506,10 +497,10 @@ public class Main {
         } finally {
             try {
                 clientSocket.shutdownOutput();
-            } catch (IOException e) { }
+            } catch (IOException e) {}
             try {
                 clientSocket.close();
-            } catch (IOException e) { }
+            } catch (IOException e) {}
             System.err.println("Client connection closed.");
         }
     }
