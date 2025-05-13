@@ -320,7 +320,7 @@ public class Main {
                 System.err.println("P_DTP_R: Invalid topic_name length " + nameLen + " for topic " + (i+1) + ". STRING requires >= 0.");
             } else if (nameLen > 0) {
                 if (nameLen > remaining - bytesConsumed) {
-                    System.err.println("P_DTP_R: Stated topic_name length " + nameLen + " for topic " + (i+1)(array index out of bounds) + " exceeds remaining body bytes " + (remaining - bytesConsumed) + ". Malformed.");
+                    System.err.println("P_DTP_R: Stated topic_name length " + nameLen + " for topic " + (i+1) + " exceeds remaining body bytes " + (remaining - bytesConsumed) + ". Malformed.");
                     if (firstTopicName == null) firstTopicName = "";
                     break;
                 }
