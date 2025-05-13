@@ -398,20 +398,12 @@ public class Main {
         int messageSize = responseHeader.length + responseBody.length;
 
         ByteBuffer buffer = ByteBuffer.allocate(4 + messageSize);
-        ByteBuffer buffer = ByteBuffer.allocate(4 + 4 + bodySize);
         buffer.order(ByteOrder.BIG_ENDIAN);
 
         // message_length = correlation_id (4) + body size
         buffer.putInt(messageSize);
         buffer.put(responseHeader);
         buffer.put(responseBody);
-
-        buffer.putInt(correlationId);
-        buffer.putShort((short) 3);  // error_code = 3 (UNKNOWN_TOPIC_OR_PARTITION)
-        buffer.put(topicField);      // fixed 115-byte topic field
-        buffer.put(topicId);         // fixed 16-byte topic_id field (all zeros)
-        buffer.putInt(0);            // partitions_count = 0
-
         return buffer.array();
     }
 
