@@ -70,6 +70,17 @@ public class Main {
         public FullRequestHeader() {}
     }
 
+    // Helper class for readKafkaString results
+    public static class KafkaStringReadResult {
+        public final String value;
+        public final int bytesRead; // Total bytes read from stream for this string field
+
+        public KafkaStringReadResult(String value, int bytesRead) {
+            this.value = value;
+            this.bytesRead = bytesRead;
+        }
+    }
+
     /**
      * Reads exactly n bytes from the InputStream.
      * @param in the input stream.
@@ -87,7 +98,39 @@ public class Main {
             }
             totalRead += bytesRead;
         }
+        System.err.println("readNBytes: Requested=" + n + ", Read=" + totalRead + ", Data=" + bytesToHex(data));
         return data;
+    }
+
+    // Helper for logging byte arrays as hex
+    private static final char[] HEX_ARRAY = "0123456789ABCDEF".toCharArray();
+    public static String bytesToHex(byte[] bytes) {
+        if (bytes == null) return "null";
+        char[] hexChars = new char[bytes.length * 2];
+        for (int j = 0; j < bytes.length; j++) {
+            int v = bytes[j] & 0xFF;
+            hexChars[j * 2] = HEX_ARRAY[v >>> 4];
+            hexChars[j * 2 + 1] = HEX_ARRAY[v & 0x0F];
+        }
+        return new String(hexChars);
+    }
+
+    public static KafkaStringReadResult readKafkaString(InputStream in) throws IOException {
+        byte[] lengthBytes = readNBytes(in, 2); // readNBytes will print its own log
+        short length = ByteBuffer.wrap(lengthBytes).order(ByteOrder.BIG_ENDIAN).getShort();
+        System.err.println("readKafkaString: Length bytes=" + bytesToHex(lengthBytes) + ", Length=" + length);
+
+        if (length == -1) { // Nullable string is null
+            return new KafkaStringReadResult(null, 2);
+        }
+        if (length < 0) { // Invalid length
+            System.err.println("readKafkaString: Invalid negative length " + length + " (and not -1 for null). Treating as empty string.");
+            return new KafkaStringReadResult("", 2);
+        }
+
+        byte[] stringPayloadBytes = readNBytes(in, length); // readNBytes will print its own log
+        System.err.println("readKafkaString: Read " + length + " bytes for string payload, Data=" + bytesToHex(stringPayloadBytes));
+        return new KafkaStringReadResult(new String(stringPayloadBytes, StandardCharsets.UTF_8), 2 + length);
     }
 
     /**
@@ -117,26 +160,19 @@ public class Main {
         frh.apiVersion = commonHeaderBuffer.getShort();
         frh.correlationId = commonHeaderBuffer.getInt();
 
-        // Read clientId (Kafka STRING)
-        byte[] clientIdLenBytes = readNBytes(in, 2);
-        short clientIdLenRaw = ByteBuffer.wrap(clientIdLenBytes).order(ByteOrder.BIG_ENDIAN).getShort();
-
-        if (clientIdLenRaw == -1) { // Null string
-            frh.clientId = null;
-            frh.clientIdFieldLengthBytes = 2;
-        } else if (clientIdLenRaw < 0) { // Invalid length for a non-null string
-            System.err.println("Warning: Invalid Client ID length: " + clientIdLenRaw + ". Treating as empty.");
-            frh.clientId = ""; // Treat as empty, though this is a protocol violation.
-            frh.clientIdFieldLengthBytes = 2; // Consumed the length field
-        } else { // Valid length (>=0)
-            byte[] clientIdValueBytes = readNBytes(in, clientIdLenRaw);
-            frh.clientId = new String(clientIdValueBytes, StandardCharsets.UTF_8);
-            frh.clientIdFieldLengthBytes = 2 + clientIdLenRaw;
-        }
+        // Read ClientId using the new helper, mimicking Python's read_string call
+        KafkaStringReadResult clientIdResult = readKafkaString(in);
+        frh.clientId = clientIdResult.value;
+        frh.clientIdFieldLengthBytes = clientIdResult.bytesRead;
 
         int commonHeaderSize = 8; // apiKey (2) + apiVersion (2) + correlationId (4)
-        frh.bodySize = frh.messageSize - commonHeaderSize - frh.clientIdFieldLengthBytes;
+        int headerSizeForBodyCalc = commonHeaderSize + frh.clientIdFieldLengthBytes; // Mimics python's header_size calculation
+        frh.bodySize = frh.messageSize - headerSizeForBodyCalc;
 
+        // Mimic Python's print statement at the end of read_request_header
+        System.err.println("readFullRequestHeader: TotalSize=" + frh.messageSize +
+                           ", HeaderSize=" + headerSizeForBodyCalc +
+                           ", BodySize=" + frh.bodySize);
         return frh;
     }
 
@@ -148,7 +184,7 @@ public class Main {
     public static void discardRemainingRequest(InputStream in, int remaining) throws IOException {
         while (remaining > 0) {
             byte[] buffer = new byte[Math.min(4096, remaining)];
-            int read = in.read(buffer, 0, Math.min(buffer.length, remaining));
+            int read = in.read(buffer, 0, buffer.length); // Read up to the buffer's capacity (which is the chunk_size)
             if (read == -1) {
                 throw new IOException("Unexpected end of stream while discarding " + remaining + " bytes");
             }
@@ -179,37 +215,11 @@ public class Main {
     }
 
     /**
-     * Builds an error response when the requested API version is unsupported.
+     * Builds an API Versions response, mimicking the Python build_api_versions_response.
+     * Handles both success and error (unsupported version) cases.
+     * The response includes a flexible header (correlation_id + tag_buffer).
      * <p>
-     * Constructs a response that contains:
-     * <ul>
-     *   <li>error_code: INT16 (2 bytes)</li>
-     *   <li>compact array: 1 byte (0, meaning no elements) </li>
-     *   <li>throttle_time_ms: INT32 (4 bytes, value 0)</li>
-     *   <li>response TAG_BUFFER: 1 byte (0x00)</li>
-     * </ul>
-     * Overall, the body is 8 bytes; prepended by correlation_id (4 bytes) gives 12.
-     * The overall response includes a 4-byte message_length (which is 12).
-     * @param correlationId the correlation id from the request.
-     * @param errorCode the error code (e.g. 35).
-     * @return the complete error response bytes.
-     */
-    public static byte[] buildErrorResponse(int correlationId, short errorCode) {
-        ByteBuffer buffer = ByteBuffer.allocate(16);
-        buffer.order(ByteOrder.BIG_ENDIAN);
-        buffer.putInt(4 + 8); // message_length = 12 (correlation_id + body)
-        buffer.putInt(correlationId);
-        buffer.putShort(errorCode);
-        buffer.put((byte) 0); // compact array: no elements
-        buffer.putInt(0);     // throttle_time_ms
-        buffer.put((byte) 0); // TAG_BUFFER
-        return buffer.array();
-    }
-
-    /**
-     * Builds a successful API Versions response.
-     * <p>
-     * Constructs a response with:
+     * Success response body (22 bytes):
      * <ul>
      *   <li>error_code: INT16 (2 bytes, value 0)</li>
      *   <li>api_keys: compact array length: 1 byte (value 2, meaning one element + 1)</li>
@@ -218,57 +228,78 @@ public class Main {
      *        min_version: INT16 (value 0),
      *        max_version: INT16 (value 4),
      *        entry TAG_BUFFER: 1 byte (0x00)
-     *   </li>
+     *   </li>     
+     *   <li>A DescribeTopicPartitions entry (7 bytes) containing:
+     *        api_key: INT16 (value 75),
+     *        min_version: INT16 (value 0),
+     *        max_version: INT16 (value 0),
+     *        entry TAG_BUFFER: 1 byte (0x00)
+     *   </li>     
      *   <li>throttle_time_ms: INT32 (value 0)</li>
      *   <li>overall TAG_BUFFER: 1 byte (0x00)</li>
      * </ul>
-     * Overall the body is 15 bytes; with correlation_id (4 bytes) it totals 19,
-     * and with the message_length field (4 bytes) the complete response is 23 bytes.
+     * Error response body (8 bytes for unsupported version):
+     * <ul>
+     *  <li>error_code: INT16 (2 bytes, value 35)</li>
+     *  <li>api_keys: compact array length: 1 byte (value 1, meaning zero entries + 1)</li>
+     *  <li>throttle_time_ms: INT32 (value 0)</li>
+     *  <li>overall TAG_BUFFER: 1 byte (0x00)</li>
+     * </ul>
      * @param correlationId the correlation id from the request.
-     * @return the complete success response bytes.
+     * @param requestedApiVersion the api_version from the client's request.
+     * @return the complete ApiVersions response bytes.
      */
-    public static byte[] buildSuccessResponse(int correlationId) {
-        // Successful response body:
-        // error_code         : 2 bytes
-        // compact array length: 1 byte (3 = 2 entries + 1)
-        // Entry 1 (ApiVersions): 7 bytes 
-        //     - api_key: 2 bytes (18)
-        //     - min_version: 2 bytes (0)
-        //     - max_version: 2 bytes (4)
-        //     - TAG_BUFFER: 1 byte
-        // Entry 2 (DescribeTopicPartitions): 7 bytes
-        //     - api_key: 2 bytes (75)
-        //     - min_version: 2 bytes (0)
-        //     - max_version: 2 bytes (0)
-        //     - TAG_BUFFER: 1 byte
-        // throttle_time_ms   : 4 bytes (0)
-        // overall TAG_BUFFER : 1 byte (0)
-        // Total body = 2 + 1 + 7 + 7 + 4 + 1 = 22 bytes.
-        //
-        // The full response consists of:
-        // message_length (4 bytes) + correlation_id (4 bytes) + body (22 bytes) = 30 bytes.
-        int bodySize = 22;
-        ByteBuffer buffer = ByteBuffer.allocate(4 + 4 + bodySize);
+    public static byte[] buildApiVersionsInternalResponse(int correlationId, short requestedApiVersion) {
+        byte[] bodyBytes;
+        short errorCode;
+
+        if (requestedApiVersion < 0 || requestedApiVersion > 4) {
+            errorCode = 35; // UNSUPPORTED_VERSION
+            ByteBuffer errorBodyBuffer = ByteBuffer.allocate(8);
+            errorBodyBuffer.order(ByteOrder.BIG_ENDIAN);
+            errorBodyBuffer.putShort(errorCode);        // error_code
+            errorBodyBuffer.put((byte) 1);              // compact array length (0 entries + 1)
+            errorBodyBuffer.putInt(0);                  // throttle_time_ms
+            errorBodyBuffer.put((byte) 0);              // overall TAG_BUFFER
+            bodyBytes = errorBodyBuffer.array();
+        } else {
+            errorCode = 0; // Success
+            ByteBuffer successBodyBuffer = ByteBuffer.allocate(22);
+            successBodyBuffer.order(ByteOrder.BIG_ENDIAN);
+            successBodyBuffer.putShort(errorCode);      // error_code = 0
+            successBodyBuffer.put((byte) 3);            // compact array length (2 entries + 1)
+            
+            // Entry 1: ApiVersions (api_key 18)
+            successBodyBuffer.putShort((short) 18);     // api_key
+            successBodyBuffer.putShort((short) 0);      // min_version
+            successBodyBuffer.putShort((short) 4);      // max_version
+            successBodyBuffer.put((byte) 0);            // entry TAG_BUFFER
+            
+            // Entry 2: DescribeTopicPartitions (api_key 75)
+            successBodyBuffer.putShort((short) 75);     // api_key
+            successBodyBuffer.putShort((short) 0);      // min_version
+            successBodyBuffer.putShort((short) 0);      // max_version
+            successBodyBuffer.put((byte) 0);            // entry TAG_BUFFER
+            
+            successBodyBuffer.putInt(0);                // throttle_time_ms
+            successBodyBuffer.put((byte) 0);            // overall TAG_BUFFER
+            bodyBytes = successBodyBuffer.array();
+        }
+
+        // Header part: correlation_id (4 bytes) + tag_buffer (1 byte)
+        byte[] headerBytes = ByteBuffer.allocate(5)
+                .order(ByteOrder.BIG_ENDIAN)
+                .putInt(correlationId)
+                .put((byte) 0) // Header tag buffer
+                .array();
+
+        int messageSizeField = headerBytes.length + bodyBytes.length;
+
+        ByteBuffer buffer = ByteBuffer.allocate(4 + messageSizeField);
         buffer.order(ByteOrder.BIG_ENDIAN);
-        buffer.putInt(4 + bodySize);      // message_length = 4 (correlation_id) + bodySize = 26 bytes payload
-        buffer.putInt(correlationId);       // correlation_id
-        buffer.putShort((short) 0);         // error_code = 0
-        buffer.put((byte) 3);               // compact array length = 3 (i.e. 2 entries + 1)
-        
-        // Entry 1: ApiVersions (api_key 18)
-        buffer.putShort((short) 18);        // api_key = 18
-        buffer.putShort((short) 0);         // min_version = 0
-        buffer.putShort((short) 4);         // max_version = 4
-        buffer.put((byte) 0);               // entry TAG_BUFFER
-        
-        // Entry 2: DescribeTopicPartitions (api_key 75)
-        buffer.putShort((short) 75);        // api_key = 75
-        buffer.putShort((short) 0);         // min_version = 0
-        buffer.putShort((short) 0);         // max_version = 0
-        buffer.put((byte) 0);               // entry TAG_BUFFER
-        
-        buffer.putInt(0);                   // throttle_time_ms = 0
-        buffer.put((byte) 0);               // overall TAG_BUFFER = 0
+        buffer.putInt(messageSizeField); // Total length of (headerBytes + bodyBytes)
+        buffer.put(headerBytes);
+        buffer.put(bodyBytes);
         return buffer.array();
     }
 
@@ -442,6 +473,7 @@ public class Main {
             InputStream clientInputStream = clientSocket.getInputStream();
             OutputStream clientOutputStream = clientSocket.getOutputStream();
             while (true) {
+                byte[] response = null;
                 FullRequestHeader fullHeader;
                 try {
                     fullHeader = readFullRequestHeader(clientInputStream);
@@ -469,26 +501,39 @@ public class Main {
                         discardRemainingRequest(clientInputStream, fullHeader.bodySize);
                         System.err.println("Discarded " + fullHeader.bodySize + " bytes from ApiVersions request body.");
                     }
-                    buildApiVersionsResponse(fullHeader, clientOutputStream);
+                    // Call the consolidated method that handles both success and error based on version
+                    response = buildApiVersionsInternalResponse(fullHeader.correlationId, fullHeader.apiVersion);
+                    System.err.println("Prepared ApiVersions response (" + (response != null ? response.length : 0) + " bytes)");
                 } else if (fullHeader.apiKey == 75) {
-                    String topic;
-                    try {
-                        topic = parseDescribeTopicPartitionsRequest(clientInputStream, fullHeader.bodySize);
-                        System.err.println("Parsed topic: " + topic);
-                    } catch (IOException e) {
-                        System.err.println("Error parsing DescribeTopicPartitions request: " + e.getMessage());
-                        topic = ""; // Use empty string on error, consistent with parsing logic
+                    if (fullHeader.apiVersion == 0) {
+                        String topicName;
+                        try {
+                            topicName = parseDescribeTopicPartitionsRequest(clientInputStream, fullHeader.bodySize);
+                            System.err.println("Parsed DescribeTopicPartitions v0 request for topic: '" + topicName + "'");
+                        } catch (IOException e) {
+                            System.err.println("Error parsing DescribeTopicPartitions v0 request: " + e.getMessage());
+                            topicName = ""; // Fallback on parsing error
+                        }
+                        response = buildDescribeTopicPartitionsResponse(fullHeader.correlationId, topicName);
+                        System.err.println("Prepared DescribeTopicPartitions v0 (Unknown Topic) response (" + (response != null ? response.length : 0) + " bytes)");
+                    } else {
+                        System.err.println("Unsupported DescribeTopicPartitions version: " + fullHeader.apiVersion + ". Discarding body.");
+                        if (fullHeader.bodySize > 0) {
+                            discardRemainingRequest(clientInputStream, fullHeader.bodySize);
+                        }
+                        // No response for unsupported version, response remains null
                     }
-                    byte[] response = buildDescribeTopicPartitionsResponse(fullHeader.correlationId, topic);
-                    clientOutputStream.write(response);
-                    clientOutputStream.flush();
-                    System.err.println("Sent DescribeTopicPartitions response (" + response.length + " bytes)");
                 } else {
                     System.err.println("Unknown api_key " + fullHeader.apiKey + ", skipping.");
                     if (fullHeader.bodySize > 0) {
                         discardRemainingRequest(clientInputStream, fullHeader.bodySize);
                         System.err.println("Discarded " + fullHeader.bodySize + " bytes from unknown request.");
                     }
+                }
+
+                if (response != null) {
+                    clientOutputStream.write(response);
+                    clientOutputStream.flush();
                 }
             }
         } catch (Throwable t) {
