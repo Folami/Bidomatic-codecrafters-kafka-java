@@ -452,41 +452,52 @@ public class Main {
             InputStream clientInputStream = clientSocket.getInputStream();
             OutputStream clientOutputStream = clientSocket.getOutputStream();
             while (true) {
-                RequestHeader header;
+                FullRequestHeader fullHeader;
                 try {
-                    header = readRequestHeader(clientInputStream);
+                    fullHeader = readFullRequestHeader(clientInputStream);
                 } catch (IOException ioe) {
+                    System.err.println("IOException while reading header, closing connection: " + ioe.getMessage());
                     break;
+                } catch (Exception e) { // Catch other potential errors during header parsing
+                    System.err.println("Error reading full request header: " + e.getMessage());
+                    break; 
                 }
-                System.err.println("Received correlation_id: " + header.correlationId
-                        + ", requested api_version: " + header.apiVersion
-                        + ", api_key: " + header.apiKey);
-                System.err.println("Received request size: " + header.requestSize);
+                System.err.println("Received correlation_id: " + fullHeader.correlationId
+                        + ", requested api_version: " + fullHeader.apiVersion
+                        + ", api_key: " + fullHeader.apiKey);
+                System.err.println("Received request messageSize (payload after size field): " + fullHeader.messageSize);
+                System.err.println("Client ID: '" + fullHeader.clientId + "', Client ID field length: " + fullHeader.clientIdFieldLengthBytes);
+                System.err.println("Calculated request bodySize: " + fullHeader.bodySize);
 
-                int remainingBytes = header.requestSize - 8;
-                if (header.apiKey == 18) {
-                    if (remainingBytes > 0) {
-                        discardRemainingRequest(clientInputStream, remainingBytes);
-                        System.err.println("Discarded " + remainingBytes + " bytes from ApiVersions request.");
+                if (fullHeader.bodySize < 0) {
+                    System.err.println("Error: Calculated negative bodySize (" + fullHeader.bodySize + "). Protocol error or parsing issue.");
+                    break; // Critical error, close connection
+                }
+
+                if (fullHeader.apiKey == 18) { // ApiVersions
+                    if (fullHeader.bodySize > 0) {
+                        discardRemainingRequest(clientInputStream, fullHeader.bodySize);
+                        System.err.println("Discarded " + fullHeader.bodySize + " bytes from ApiVersions request body.");
                     }
-                    buildApiVersionsResponse(header, clientOutputStream);
-                } else if (header.apiKey == 75) {
+                    buildApiVersionsResponse(fullHeader, clientOutputStream);
+                } else if (fullHeader.apiKey == 75) { // DescribeTopicPartitions
                     String topic = null;
                     try {
-                        topic = parseDescribeTopicPartitionsRequest(clientInputStream, remainingBytes);
+                        topic = parseDescribeTopicPartitionsRequest(clientInputStream, fullHeader.bodySize);
                         System.err.println("Parsed topic: " + topic);
                     } catch (IOException e) {
                         System.err.println("Error parsing DescribeTopicPartitions request: " + e.getMessage());
                         topic = "unknown"; // Fallback, but ideally send an error response
                     } // topic will be "" if parsing failed or topic name was empty
-                    byte[] response = buildDescribeTopicPartitionsResponse(header.correlationId, topic); // Pass the parsed topic name
+                    byte[] response = buildDescribeTopicPartitionsResponse(fullHeader.correlationId, topic); // Pass the parsed topic name
                     clientOutputStream.write(response);
                     clientOutputStream.flush();
                     System.err.println("Sent DescribeTopicPartitions response (" + response.length + " bytes)");
                 } else {
-                    System.err.println("Unknown api_key " + header.apiKey + ", skipping.");
-                    if (remainingBytes > 0) {
-                        discardRemainingRequest(clientInputStream, remainingBytes);
+                    System.err.println("Unknown api_key " + fullHeader.apiKey + ", skipping.");
+                    if (fullHeader.bodySize > 0) {
+                        discardRemainingRequest(clientInputStream, fullHeader.bodySize);
+                        System.err.println("Discarded " + fullHeader.bodySize + " bytes from unknown request.");
                     }
                 }
             }
