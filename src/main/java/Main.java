@@ -42,6 +42,20 @@ import java.io.UnsupportedEncodingException;
 public class Main {
 
     /**
+     * Encodes a Java String into Kafka's STRING format (INT16 length + UTF-8 bytes).
+     * A null string is encoded as INT16 -1.
+     * @param s the string to encode.
+     * @return the encoded bytes.
+     */
+    public static byte[] encodeKafkaString(String s) {
+        if (s == null) {
+            return ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) -1).array();
+        }
+        byte[] utf8Bytes = s.getBytes(StandardCharsets.UTF_8);
+        return ByteBuffer.allocate(2 + utf8Bytes.length).order(ByteOrder.BIG_ENDIAN).putShort((short) utf8Bytes.length).put(utf8Bytes).array();
+    }
+
+    /**
      * Helper class to hold the incoming request header.
      */
     public static class RequestHeader {
@@ -254,59 +268,144 @@ public class Main {
      * Returns the topic name of the first valid topic, or null if none found.
      */
     public static String parseDescribeTopicPartitionsRequest(InputStream in, int remaining) throws IOException {
-        // Ensure we have at least 2 bytes for the string's length
+        int bytesConsumed = 0;
+        String firstTopicName = null;
+
+        // Read topicsCount (INT16)
         if (remaining < 2) {
-            throw new IOException("Not enough bytes for topic name length: " + remaining);
+            System.err.println("P_DTP_R: Body too small for topicsCount (" + remaining + " bytes).");
+            if (remaining > 0) discardRemainingRequest(in, remaining);
+            return "";
         }
-        // Read the 2-byte length field
-        byte[] lengthBytes = readNBytes(in, 2);
-        int bytesRead = 2;
-        short strLen = ByteBuffer.wrap(lengthBytes).order(ByteOrder.BIG_ENDIAN).getShort();
-        String topicName;
-        if (strLen < 0) {
-            // Handle a null topic name as empty string
-            topicName = "";
-        } else {
-            if (remaining - bytesRead < strLen) {
-                throw new IOException("Not enough bytes for topic name: expected " + strLen + ", remaining " + (remaining - bytesRead));
+        byte[] topicsCountBytes = readNBytes(in, 2);
+        bytesConsumed += 2;
+        short topicsCount = ByteBuffer.wrap(topicsCountBytes).order(ByteOrder.BIG_ENDIAN).getShort();
+
+        if (topicsCount < 0) { // Invalid count
+            System.err.println("P_DTP_R: Invalid topics_count " + topicsCount + ".");
+            if (remaining - bytesConsumed > 0) discardRemainingRequest(in, remaining - bytesConsumed);
+            return "";
+        }
+
+        System.err.println("P_DTP_R: Expecting " + topicsCount + " topics.");
+
+        for (int i = 0; i < topicsCount; i++) {
+            // Parse Topic Name (STRING)
+            if (remaining - bytesConsumed < 2) { // Not enough for name length field
+                System.err.println("P_DTP_R: Not enough data for topic_name length (topic " + (i+1) + "). Remaining: " + (remaining - bytesConsumed));
+                break; // Malformed request
             }
-            byte[] nameBytes = readNBytes(in, strLen);
-            bytesRead += strLen;
-            topicName = new String(nameBytes, StandardCharsets.UTF_8);
+            byte[] nameLenBytes = readNBytes(in, 2);
+            bytesConsumed += 2;
+            short nameLen = ByteBuffer.wrap(nameLenBytes).order(ByteOrder.BIG_ENDIAN).getShort();
+
+            String currentTopicNameStr = "";
+            if (nameLen < 0) { // Kafka STRING length must be >= 0
+                 System.err.println("P_DTP_R: Invalid topic_name length " + nameLen + " for topic " + (i+1) + ". STRING requires >= 0.");
+                 // Malformed. Treat as empty name for this topic.
+            } else if (nameLen > 0) { // Only read payload if length > 0
+                if (nameLen > remaining - bytesConsumed) {
+                    System.err.println("P_DTP_R: Stated topic_name length " + nameLen + " for topic " + (i+1) + " exceeds remaining body bytes " + (remaining - bytesConsumed) + ". Malformed.");
+                    if (firstTopicName == null) firstTopicName = ""; // Ensure it's set if this was the first
+                    break; // Stop parsing topics, rest of body will be discarded.
+                }
+                byte[] namePayloadBytes = readNBytes(in, nameLen);
+                bytesConsumed += nameLen;
+                try {
+                    currentTopicNameStr = new String(namePayloadBytes, StandardCharsets.UTF_8);
+                } catch (Exception e) { // Catch any decoding issues
+                    System.err.println("P_DTP_R: Topic_name for topic " + (i+1) + " had decode error. Treating as empty.");
+                    // currentTopicNameStr remains ""
+                }
+            }
+            // If nameLen == 0, currentTopicNameStr is already ""
+
+            if (firstTopicName == null) {
+                firstTopicName = currentTopicNameStr;
+            }
+
+            // Parse Partitions for this topic (INT32 count + INT32 array)
+            if (remaining - bytesConsumed < 4) { // Not enough for partitionsCount field
+                System.err.println("P_DTP_R: Not enough data for partitionsCount (topic " + (i+1) + "). Remaining: " + (remaining - bytesConsumed));
+                break; // Malformed request
+            }
+            byte[] partitionsCountBytes = readNBytes(in, 4);
+            bytesConsumed += 4;
+            int partitionsCount = ByteBuffer.wrap(partitionsCountBytes).order(ByteOrder.BIG_ENDIAN).getInt();
+
+            if (partitionsCount < 0) {
+                 System.err.println("P_DTP_R: Invalid partitions_count " + partitionsCount + " for topic " + (i+1) + ".");
+                 break; // Malformed. Stop parsing topics.
+            }
+
+            int bytesForPartitionIds = partitionsCount * 4;
+            if (bytesForPartitionIds > 0) { // Only try to read if count > 0
+                 if (bytesForPartitionIds > remaining - bytesConsumed) {
+                     System.err.println("P_DTP_R: Stated " + bytesForPartitionIds + " bytes for partition IDs (topic " + (i+1) + ") exceeds remaining body bytes " + (remaining - bytesConsumed) + ". Malformed.");
+                     break; // Malformed. Stop parsing topics.
+                 }
+                 // We just discard partition IDs as per problem spec for now
+                 discardRemainingRequest(in, bytesForPartitionIds);
+                 bytesConsumed += bytesForPartitionIds;
+            }
         }
-        // Discard any extra bytes in the body
-        if (remaining > bytesRead) {
-            discardRemainingRequest(in, remaining - bytesRead);
+
+        // Consume any remaining bytes specified by the initial 'remaining' size, if not fully parsed.
+        int unparsedBytes = remaining - bytesConsumed;
+        if (unparsedBytes > 0) {
+            System.err.println("P_DTP_R: Discarding " + unparsedBytes + " unparsed bytes from request body.");
+            discardRemainingRequest(in, unparsedBytes);
+        } else if (unparsedBytes < 0) {
+             System.err.println("P_DTP_R: WARNING - Consumed " + bytesConsumed + " bytes, but initial remaining was " + remaining + ".");
         }
-        return topicName;
+
+        String parsedTopicName = (firstTopicName != null) ? firstTopicName : "";
+        System.err.println("P_DTP_R: Parsed first topic='" + parsedTopicName + "'");
+        return parsedTopicName;
     }
 
     /**
      * Builds a DescribeTopicPartitions (v0) response for an unknown topic.
      * The response body is:
      *   - error_code: INT16 (2 bytes) = 3 (UNKNOWN_TOPIC_OR_PARTITION)
-     *   - topic_name: fixed 115-byte field (UTF-8 bytes padded with zeros)
+     *   - topic_name: STRING (INT16 length + UTF-8 bytes)
      *   - topic_id: 16 bytes of zeros (UUID all zeros)
      *   - partitions: int32 count = 0 (empty array)
      */
     public static byte[] buildDescribeTopicPartitionsResponse(int correlationId, String topic) throws IOException {
-        // Convert topic to UTF-8 bytes
-        byte[] topicBytes = topic.getBytes("UTF-8");
+        if (topic == null) {
+            topic = ""; // Default to empty string if null
+        }
+        System.err.println("build_describe_topic_partitions_response: topic_name='" + topic + "' for response.");
 
-        // Create a fixed 115-byte field for the topic name, padded with zeros
-        byte[] topicField = new byte[115];
-        System.arraycopy(topicBytes, 0, topicField, 0, Math.min(topicBytes.length, 115));
+        byte[] error_code_bytes = ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 3).array();
+        byte[] topic_name_encoded_as_kafka_string = encodeKafkaString(topic);
 
         // Fixed topic_id: 16 bytes of zeros (UUID 00000000-0000-0000-0000-000000000000)
         byte[] topicId = new byte[16];
+        byte[] partitions_count_bytes = ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN).putInt(0).array(); // partitions_count = 0
 
-        // Body size: error_code (2) + topic_field (115) + topic_id (16) + partitions_count (4)
-        int bodySize = 2 + 115 + 16 + 4;
+        byte[] responseBody = concatenateByteArrays(
+            error_code_bytes,
+            topic_name_encoded_as_kafka_string,
+            topicId,
+            partitions_count_bytes
+        );
+
+        // Response Header for v0 is just the Correlation ID (4 bytes)
+        byte[] responseHeader = ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN).putInt(correlationId).array();
+
+        int messageSize = responseHeader.length + responseBody.length;
+
+        ByteBuffer buffer = ByteBuffer.allocate(4 + messageSize);
         ByteBuffer buffer = ByteBuffer.allocate(4 + 4 + bodySize);
         buffer.order(ByteOrder.BIG_ENDIAN);
 
         // message_length = correlation_id (4) + body size
-        buffer.putInt(4 + bodySize);
+        buffer.putInt(messageSize);
+        buffer.put(responseHeader);
+        buffer.put(responseBody);
+
         buffer.putInt(correlationId);
         buffer.putShort((short) 3);  // error_code = 3 (UNKNOWN_TOPIC_OR_PARTITION)
         buffer.put(topicField);      // fixed 115-byte topic field
@@ -314,6 +413,21 @@ public class Main {
         buffer.putInt(0);            // partitions_count = 0
 
         return buffer.array();
+    }
+
+    // Helper to concatenate byte arrays
+    private static byte[] concatenateByteArrays(byte[]... arrays) {
+        int totalLength = 0;
+        for (byte[] array : arrays) {
+            totalLength += array.length;
+        }
+        byte[] result = new byte[totalLength];
+        int offset = 0;
+        for (byte[] array : arrays) {
+            System.arraycopy(array, 0, result, offset, array.length);
+            offset += array.length;
+        }
+        return result;
     }
 
     /**
@@ -356,11 +470,8 @@ public class Main {
                     } catch (IOException e) {
                         System.err.println("Error parsing DescribeTopicPartitions request: " + e.getMessage());
                         topic = "unknown"; // Fallback, but ideally send an error response
-                    }
-                    if (topic == null) {
-                        topic = "unknown"; // Fallback for empty or invalid topic list
-                    }
-                    byte[] response = buildDescribeTopicPartitionsResponse(header.correlationId, topic);
+                    } // topic will be "" if parsing failed or topic name was empty
+                    byte[] response = buildDescribeTopicPartitionsResponse(header.correlationId, topic); // Pass the parsed topic name
                     clientOutputStream.write(response);
                     clientOutputStream.flush();
                     System.err.println("Sent DescribeTopicPartitions response (" + response.length + " bytes)");
