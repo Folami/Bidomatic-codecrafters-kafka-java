@@ -473,12 +473,8 @@ public class Main {
         return result;
     }
 
-    /**
-     * Handles an individual client connection, mimicking Python's handle_client.
-     * Processes multiple sequential requests from the same client.
-     */
-    public static void handleClient(Socket clientSocket) {
-        class ParseResult {
+    private static class ClientHandler {
+        static class ParseResult {
             final short apiKey;
             final short apiVersion;
             final int correlationId;
@@ -496,7 +492,7 @@ public class Main {
             }
         }
 
-        ParseResult parseRequestHeader(InputStream in) throws IOException {
+        static ParseResult parseRequestHeader(InputStream in) throws IOException {
             FullRequestHeader header = readFullRequestHeader(in);
             System.err.println("parse_request_header: api_key=" + header.apiKey +
                                ", api_version=" + header.apiVersion +
@@ -505,7 +501,7 @@ public class Main {
                                    header.clientId, header.clientIdFieldLengthBytes, header.bodySize);
         }
 
-        byte parseTaggedField(InputStream in, int remaining) throws IOException {
+        static byte parseTaggedField(InputStream in, int remaining) throws IOException {
             if (remaining < 1) {
                 System.err.println("parse_tagged_field: Not enough data for tagged field. Remaining: " + remaining);
                 return 0;
@@ -515,7 +511,7 @@ public class Main {
             return taggedBytes[0];
         }
 
-        void handleApiVersionsRequest(OutputStream out, int correlationId, short apiVersion, int bodySize, InputStream in) throws IOException {
+        static void handleApiVersionsRequest(OutputStream out, int correlationId, short apiVersion, int bodySize, InputStream in) throws IOException {
             if (bodySize > 0) {
                 discardRemainingRequest(in, bodySize);
                 System.err.println("Discarded " + bodySize + " bytes from ApiVersions request body.");
@@ -526,14 +522,8 @@ public class Main {
             System.err.println("Sent ApiVersions response (" + response.length + " bytes)");
         }
 
-        void handleDescribeTopicPartitionsRequest(
-            OutputStream out, 
-            int correlationId,
-            short apiVersion, 
-            int bodySize, 
-            InputStream in, 
-            int clientIdLen
-        ) throws IOException {
+        static void handleDescribeTopicPartitionsRequest(
+                OutputStream out, int correlationId, short apiVersion, int bodySize, InputStream in, int clientIdLen) throws IOException {
             if (apiVersion != 0) {
                 System.err.println("Unsupported DescribeTopicPartitions version: " + apiVersion + ". Discarding body.");
                 if (bodySize > 0) {
@@ -560,21 +550,27 @@ public class Main {
             System.err.println("Sent DescribeTopicPartitions v0 response (" + response.length + " bytes)");
         }
 
-        void handleUnknownRequest(int apiKey, int bodySize, InputStream in) throws IOException {
+        static void handleUnknownRequest(int apiKey, int bodySize, InputStream in) throws IOException {
             System.err.println("Unknown api_key " + apiKey + ", skipping.");
             if (bodySize > 0) {
                 discardRemainingRequest(in, bodySize);
                 System.err.println("Discarded " + bodySize + " bytes from unknown request.");
             }
         }
+    }
 
+    /**
+     * Handles an individual client connection, mimicking Python's handle_client.
+     * Processes multiple sequential requests from the same client.
+     */
+    public static void handleClient(Socket clientSocket) {
         try {
             InputStream in = clientSocket.getInputStream();
             OutputStream out = clientSocket.getOutputStream();
             while (true) {
-                ParseResult header;
+                ClientHandler.ParseResult header;
                 try {
-                    header = parseRequestHeader(in);
+                    header = ClientHandler.parseRequestHeader(in);
                 } catch (IOException e) {
                     System.err.println("IOException while reading header, closing connection: " + e.getMessage());
                     break;
@@ -595,11 +591,11 @@ public class Main {
                 }
 
                 if (header.apiKey == 18) {
-                    handleApiVersionsRequest(out, header.correlationId, header.apiVersion, header.bodySize, in);
+                    ClientHandler.handleApiVersionsRequest(out, header.correlationId, header.apiVersion, header.bodySize, in);
                 } else if (header.apiKey == 75) {
-                    handleDescribeTopicPartitionsRequest(out, header.correlationId, header.apiVersion, header.bodySize, in, header.clientIdLen);
+                    ClientHandler.handleDescribeTopicPartitionsRequest(out, header.correlationId, header.apiVersion, header.bodySize, in, header.clientIdLen);
                 } else {
-                    handleUnknownRequest(header.apiKey, header.bodySize, in);
+                    ClientHandler.handleUnknownRequest(header.apiKey, header.bodySize, in);
                 }
             }
         } catch (Throwable t) {
