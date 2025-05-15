@@ -8,7 +8,7 @@ import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 
 /**
- * Main class for a simple Kafka clone that supports the ApiVersions request.
+ * Main class for a simple Kafka clone that supports the ApiVersions and DescribeTopicPartitions requests.
  * <p>
  * The broker accepts connections on port 9092, reads a fixed 12-byte header 
  * (4 bytes message size (size of payload), 2 bytes api_key, 2 bytes api_version, 4 bytes correlation_id),
@@ -17,26 +17,16 @@ import java.nio.charset.StandardCharsets;
  * For ApiVersions requests (api_key == 18):
  * <ul>
  *   <li>If the requested api_version is unsupported (< 0 or > 4) an error response with error_code 35 is returned.</li>
- *   <li>Otherwise, a successful response is returned with error_code 0 and one ApiVersion entry 
- *       (api_key 18, min_version 0, max_version 4).</li>
+ *   <li>For api_version 0–3, a successful response is returned with error_code 0 and two ApiVersion entries 
+ *       (api_key 18, min_version 0, max_version 4; api_key 75, min_version 0, max_version 0).</li>
+ *   <li>For api_version 4, a minimal successful response is returned with error_code 0 and no ApiVersion entries.</li>
  * </ul>
  * <p>
- * The successful response body layout (15 bytes) is as follows:
- * <pre>
- *   error_code                : INT16 (2 bytes)
- *   api_keys (compact array)  : 1 byte (length = 2, i.e. one element + 1)
- *     - Entry:
- *         api_key           : INT16 (2 bytes)  (value 18)
- *         min_version       : INT16 (2 bytes)  (value 0)
- *         max_version       : INT16 (2 bytes)  (value 4)
- *         entry TAG_BUFFER  : 1 byte  (0x00 for empty)
- *   throttle_time_ms          : INT32 (4 bytes, value 0)
- *   response TAG_BUFFER       : 1 byte  (0x00 for empty)
- * </pre>
- * <p>
- * The overall message after the message_length field is:
- * 4 bytes (correlation_id) + 15 bytes (body) = 19 bytes.
- * Combined with the 4-byte message_length field, the total transmission is 23 bytes.
+ * For DescribeTopicPartitions requests (api_key == 75, version 0):
+ * <ul>
+ *   <li>Responds with error_code 3 (UNKNOWN_TOPIC_OR_PARTITION), echoing the requested topic name, 
+ *       a zeroed topic_id, empty partitions, and tester-specific fields.</li>
+ * </ul>
  */
 public class Main {
 
@@ -194,7 +184,7 @@ public class Main {
 
     /**
      * Builds an API Versions response, mimicking the Python build_api_versions_response.
-     * Handles both success and error (unsupported version) cases.
+     * Handles success (v0–3, v4) and error (unsupported version) cases.
      * The response includes a flexible header (correlation_id + tag_buffer).
      * <p>
      * Success response body for api_version 0–3 (22 bytes):
@@ -213,6 +203,13 @@ public class Main {
      *        max_version: INT16 (value 0),
      *        entry TAG_BUFFER: 1 byte (0x00)
      *   </li>     
+     *   <li>throttle_time_ms: INT32 (value 0)</li>
+     *   <li>overall TAG_BUFFER: 1 byte (0x00)</li>
+     * </ul>
+     * Success response body for api_version 4 (8 bytes):
+     * <ul>
+     *   <li>error_code: INT16 (2 bytes, value 0)</li>
+     *   <li>api_keys: compact array length: 1 byte (value 1, meaning zero entries + 1)</li>
      *   <li>throttle_time_ms: INT32 (value 0)</li>
      *   <li>overall TAG_BUFFER: 1 byte (0x00)</li>
      * </ul>
@@ -240,6 +237,15 @@ public class Main {
             errorBodyBuffer.putInt(0);                  // throttle_time_ms
             errorBodyBuffer.put((byte) 0);              // overall TAG_BUFFER
             bodyBytes = errorBodyBuffer.array();
+        } else if (requestedApiVersion == 4) {
+            errorCode = 0; // Success
+            ByteBuffer minimalBodyBuffer = ByteBuffer.allocate(8);
+            minimalBodyBuffer.order(ByteOrder.BIG_ENDIAN);
+            minimalBodyBuffer.putShort(errorCode);      // error_code = 0
+            minimalBodyBuffer.put((byte) 1);            // compact array length (0 entries + 1)
+            minimalBodyBuffer.putInt(0);                // throttle_time_ms
+            minimalBodyBuffer.put((byte) 0);            // overall TAG_BUFFER
+            bodyBytes = minimalBodyBuffer.array();
         } else {
             errorCode = 0; // Success
             ByteBuffer successBodyBuffer = ByteBuffer.allocate(22);
@@ -456,7 +462,6 @@ public class Main {
         buffer.put(responseBody);
         return buffer.array();
     }
-    
 
     // Helper to concatenate byte arrays
     private static byte[] concatenateByteArrays(byte[]... arrays) {
@@ -660,6 +665,3 @@ public class Main {
         }
     }
 }
-
-
-
