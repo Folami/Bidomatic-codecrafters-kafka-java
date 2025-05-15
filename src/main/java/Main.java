@@ -216,13 +216,6 @@ public class Main {
      *   <li>throttle_time_ms: INT32 (value 0)</li>
      *   <li>overall TAG_BUFFER: 1 byte (0x00)</li>
      * </ul>
-     * Success response body for api_version 4 (8 bytes):
-     * <ul>
-     *   <li>error_code: INT16 (2 bytes, value 0)</li>
-     *   <li>api_keys: compact array length: 1 byte (value 1, meaning zero entries + 1)</li>
-     *   <li>throttle_time_ms: INT32 (value 0)</li>
-     *   <li>overall TAG_BUFFER: 1 byte (0x00)</li>
-     * </ul>
      * Error response body (8 bytes for unsupported version):
      * <ul>
      *  <li>error_code: INT16 (2 bytes, value 35)</li>
@@ -270,7 +263,6 @@ public class Main {
             successBodyBuffer.put((byte) 0);            // overall TAG_BUFFER
             bodyBytes = successBodyBuffer.array();
         }
-    }
 
         // Header part: correlation_id (4 bytes) + tag_buffer (1 byte)
         byte[] headerBytes = ByteBuffer.allocate(5)
