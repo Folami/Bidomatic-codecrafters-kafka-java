@@ -197,10 +197,10 @@ public class Main {
      * Handles both success and error (unsupported version) cases.
      * The response includes a flexible header (correlation_id + tag_buffer).
      * <p>
-     * Success response body (22 bytes):
+     * Success response body for api_version 0–3 (22 bytes):
      * <ul>
      *   <li>error_code: INT16 (2 bytes, value 0)</li>
-     *   <li>api_keys: compact array length: 1 byte (value 2, meaning one element + 1)</li>
+     *   <li>api_keys: compact array length: 1 byte (value 3, meaning two elements + 1)</li>
      *   <li>An ApiVersion entry (7 bytes) containing:
      *        api_key: INT16 (value 18),
      *        min_version: INT16 (value 0),
@@ -213,6 +213,13 @@ public class Main {
      *        max_version: INT16 (value 0),
      *        entry TAG_BUFFER: 1 byte (0x00)
      *   </li>     
+     *   <li>throttle_time_ms: INT32 (value 0)</li>
+     *   <li>overall TAG_BUFFER: 1 byte (0x00)</li>
+     * </ul>
+     * Success response body for api_version 4 (8 bytes):
+     * <ul>
+     *   <li>error_code: INT16 (2 bytes, value 0)</li>
+     *   <li>api_keys: compact array length: 1 byte (value 1, meaning zero entries + 1)</li>
      *   <li>throttle_time_ms: INT32 (value 0)</li>
      *   <li>overall TAG_BUFFER: 1 byte (0x00)</li>
      * </ul>
@@ -242,26 +249,38 @@ public class Main {
             bodyBytes = errorBodyBuffer.array();
         } else {
             errorCode = 0; // Success
-            ByteBuffer successBodyBuffer = ByteBuffer.allocate(22);
-            successBodyBuffer.order(ByteOrder.BIG_ENDIAN);
-            successBodyBuffer.putShort(errorCode);      // error_code = 0
-            successBodyBuffer.put((byte) 3);            // compact array length (2 entries + 1)
-            
-            // Entry 1: ApiVersions (api_key 18)
-            successBodyBuffer.putShort((short) 18);     // api_key
-            successBodyBuffer.putShort((short) 0);      // min_version
-            successBodyBuffer.putShort((short) 4);      // max_version
-            successBodyBuffer.put((byte) 0);            // entry TAG_BUFFER
-            
-            // Entry 2: DescribeTopicPartitions (api_key 75)
-            successBodyBuffer.putShort((short) 75);     // api_key
-            successBodyBuffer.putShort((short) 0);      // min_version
-            successBodyBuffer.putShort((short) 0);      // max_version
-            successBodyBuffer.put((byte) 0);            // entry TAG_BUFFER
-            
-            successBodyBuffer.putInt(0);                // throttle_time_ms
-            successBodyBuffer.put((byte) 0);            // overall TAG_BUFFER
-            bodyBytes = successBodyBuffer.array();
+            if (requestedApiVersion == 4) {
+                // Minimal response for version 4
+                ByteBuffer minimalBodyBuffer = ByteBuffer.allocate(8);
+                minimalBodyBuffer.order(ByteOrder.BIG_ENDIAN);
+                minimalBodyBuffer.putShort(errorCode);      // error_code = 0
+                minimalBodyBuffer.put((byte) 1);            // compact array length (0 entries + 1)
+                minimalBodyBuffer.putInt(0);                // throttle_time_ms
+                minimalBodyBuffer.put((byte) 0);            // overall TAG_BUFFER
+                bodyBytes = minimalBodyBuffer.array();
+            } else {
+                // Full response for versions 0–3
+                ByteBuffer successBodyBuffer = ByteBuffer.allocate(22);
+                successBodyBuffer.order(ByteOrder.BIG_ENDIAN);
+                successBodyBuffer.putShort(errorCode);      // error_code = 0
+                successBodyBuffer.put((byte) 3);            // compact array length (2 entries + 1)
+                
+                // Entry 1: ApiVersions (api_key 18)
+                successBodyBuffer.putShort((short) 18);     // api_key
+                successBodyBuffer.putShort((short) 0);      // min_version
+                successBodyBuffer.putShort((short) 4);      // max_version
+                successBodyBuffer.put((byte) 0);            // entry TAG_BUFFER
+                
+                // Entry 2: DescribeTopicPartitions (api_key 75)
+                successBodyBuffer.putShort((short) 75);     // api_key
+                successBodyBuffer.putShort((short) 0);      // min_version
+                successBodyBuffer.putShort((short) 0);      // max_version
+                successBodyBuffer.put((byte) 0);            // entry TAG_BUFFER
+                
+                successBodyBuffer.putInt(0);                // throttle_time_ms
+                successBodyBuffer.put((byte) 0);            // overall TAG_BUFFER
+                bodyBytes = successBodyBuffer.array();
+            }
         }
 
         // Header part: correlation_id (4 bytes) + tag_buffer (1 byte)
