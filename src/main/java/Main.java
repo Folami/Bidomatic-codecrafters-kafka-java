@@ -224,67 +224,59 @@ public class Main {
      * @param requestedApiVersion the api_version from the client's request.
      * @return the complete ApiVersions response bytes.
      */
-    public static byte[] buildApiVersionsInternalResponse(int correlationId, short requestedApiVersion) {
-        byte[] bodyBytes;
-        short errorCode;
-
-        if (requestedApiVersion < 0 || requestedApiVersion > 4) {
-            errorCode = 35; // UNSUPPORTED_VERSION
-            ByteBuffer errorBodyBuffer = ByteBuffer.allocate(8);
-            errorBodyBuffer.order(ByteOrder.BIG_ENDIAN);
-            errorBodyBuffer.putShort(errorCode);        // error_code
-            errorBodyBuffer.put((byte) 1);              // compact array length (0 entries + 1)
-            errorBodyBuffer.putInt(0);                  // throttle_time_ms
-            errorBodyBuffer.put((byte) 0);              // overall TAG_BUFFER
-            bodyBytes = errorBodyBuffer.array();
-        } else if (requestedApiVersion == 4) {
-            errorCode = 0; // Success
-            ByteBuffer minimalBodyBuffer = ByteBuffer.allocate(8);
-            minimalBodyBuffer.order(ByteOrder.BIG_ENDIAN);
-            minimalBodyBuffer.putShort(errorCode);      // error_code = 0
-            minimalBodyBuffer.put((byte) 1);            // compact array length (0 entries + 1)
-            minimalBodyBuffer.putInt(0);                // throttle_time_ms
-            minimalBodyBuffer.put((byte) 0);            // overall TAG_BUFFER
-            bodyBytes = minimalBodyBuffer.array();
-        } else {
-            errorCode = 0; // Success
-            ByteBuffer successBodyBuffer = ByteBuffer.allocate(22);
-            successBodyBuffer.order(ByteOrder.BIG_ENDIAN);
-            successBodyBuffer.putShort(errorCode);      // error_code = 0
-            successBodyBuffer.put((byte) 3);            // compact array length (2 entries + 1)
+    public static byte[] buildApiVersionsInternalResponse(int correlationId, short apiVersion) {
+        ByteArrayOutputStream response = new ByteArrayOutputStream();
+        
+        try {
+            // Check if the requested API version is supported
+            boolean isSupported = apiVersion >= 0 && apiVersion <= 4;
+            short errorCode = isSupported ? (short) 0 : (short) 35;
             
-            // Entry 1: ApiVersions (api_key 18)
-            successBodyBuffer.putShort((short) 18);     // api_key
-            successBodyBuffer.putShort((short) 0);      // min_version
-            successBodyBuffer.putShort((short) 4);      // max_version
-            successBodyBuffer.put((byte) 0);            // entry TAG_BUFFER
+            // Calculate total size (will be filled in later)
+            response.write(new byte[4]);
             
-            // Entry 2: DescribeTopicPartitions (api_key 75)
-            successBodyBuffer.putShort((short) 75);     // api_key
-            successBodyBuffer.putShort((short) 0);      // min_version
-            successBodyBuffer.putShort((short) 0);      // max_version
-            successBodyBuffer.put((byte) 0);            // entry TAG_BUFFER
+            // Response header: correlation ID
+            response.write(ByteBuffer.allocate(4).putInt(correlationId).array());
             
-            successBodyBuffer.putInt(0);                // throttle_time_ms
-            successBodyBuffer.put((byte) 0);            // overall TAG_BUFFER
-            bodyBytes = successBodyBuffer.array();
+            // Error code
+            response.write(ByteBuffer.allocate(2).putShort(errorCode).array());
+            
+            if (isSupported) {
+                // API keys array - compact array format
+                // Value 3 means 2 elements (3-1=2)
+                response.write(3);
+                
+                // First API key entry: ApiVersions (key 18)
+                response.write(ByteBuffer.allocate(2).putShort((short) 18).array());
+                response.write(ByteBuffer.allocate(2).putShort((short) 0).array());  // min_version
+                response.write(ByteBuffer.allocate(2).putShort((short) 4).array());  // max_version
+                response.write(0);  // Tagged fields (empty)
+                
+                // Second API key entry: DescribeTopicPartitions (key 75)
+                response.write(ByteBuffer.allocate(2).putShort((short) 75).array());
+                response.write(ByteBuffer.allocate(2).putShort((short) 0).array());  // min_version
+                response.write(ByteBuffer.allocate(2).putShort((short) 0).array());  // max_version
+                response.write(0);  // Tagged fields (empty)
+            } else {
+                // Empty API keys array for error case
+                response.write(1);  // Value 1 means 0 elements (1-1=0)
+            }
+            
+            // Throttle time (ms)
+            response.write(ByteBuffer.allocate(4).putInt(0).array());
+            
+            // Tagged fields (empty)
+            response.write(0);
+            
+            // Fill in the total size at the beginning
+            byte[] responseBytes = response.toByteArray();
+            ByteBuffer.wrap(responseBytes, 0, 4).putInt(responseBytes.length - 4);
+            
+            return responseBytes;
+        } catch (IOException e) {
+            System.err.println("Error building ApiVersions response: " + e.getMessage());
+            return new byte[0];
         }
-
-        // Header part: correlation_id (4 bytes) + tag_buffer (1 byte)
-        byte[] headerBytes = ByteBuffer.allocate(5)
-                .order(ByteOrder.BIG_ENDIAN)
-                .putInt(correlationId)
-                .put((byte) 0) // Header tag buffer
-                .array();
-
-        int messageSizeField = headerBytes.length + bodyBytes.length;
-
-        ByteBuffer buffer = ByteBuffer.allocate(4 + messageSizeField);
-        buffer.order(ByteOrder.BIG_ENDIAN);
-        buffer.putInt(messageSizeField); // Total length of (headerBytes + bodyBytes)
-        buffer.put(headerBytes);
-        buffer.put(bodyBytes);
-        return buffer.array();
     }
 
     /**
