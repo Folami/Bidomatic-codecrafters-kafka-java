@@ -8,7 +8,7 @@ import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 
 /**
- * Main class for a simple Kafka clone that supports the ApiVersions request.
+ * Mai class for a simple Kafka clone that supports the ApiVersions request.
  * <p>
  * The broker accepts connections on port 9092, reads a fixed 12-byte header 
  * (4 bytes message size (size of payload), 2 bytes api_key, 2 bytes api_version, 4 bytes correlation_id),
@@ -573,3 +573,8 @@ public class Main {
         }
     }
 }
+
+
+
+
+
