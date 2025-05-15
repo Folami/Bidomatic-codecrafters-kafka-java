@@ -249,39 +249,28 @@ public class Main {
             bodyBytes = errorBodyBuffer.array();
         } else {
             errorCode = 0; // Success
-            if (requestedApiVersion == 4) {
-                // Minimal response for version 4
-                ByteBuffer minimalBodyBuffer = ByteBuffer.allocate(8);
-                minimalBodyBuffer.order(ByteOrder.BIG_ENDIAN);
-                minimalBodyBuffer.putShort(errorCode);      // error_code = 0
-                minimalBodyBuffer.put((byte) 1);            // compact array length (0 entries + 1)
-                minimalBodyBuffer.putInt(0);                // throttle_time_ms
-                minimalBodyBuffer.put((byte) 0);            // overall TAG_BUFFER
-                bodyBytes = minimalBodyBuffer.array();
-            } else {
-                // Full response for versions 0–3
-                ByteBuffer successBodyBuffer = ByteBuffer.allocate(22);
-                successBodyBuffer.order(ByteOrder.BIG_ENDIAN);
-                successBodyBuffer.putShort(errorCode);      // error_code = 0
-                successBodyBuffer.put((byte) 3);            // compact array length (2 entries + 1)
-                
-                // Entry 1: ApiVersions (api_key 18)
-                successBodyBuffer.putShort((short) 18);     // api_key
-                successBodyBuffer.putShort((short) 0);      // min_version
-                successBodyBuffer.putShort((short) 4);      // max_version
-                successBodyBuffer.put((byte) 0);            // entry TAG_BUFFER
-                
-                // Entry 2: DescribeTopicPartitions (api_key 75)
-                successBodyBuffer.putShort((short) 75);     // api_key
-                successBodyBuffer.putShort((short) 0);      // min_version
-                successBodyBuffer.putShort((short) 0);      // max_version
-                successBodyBuffer.put((byte) 0);            // entry TAG_BUFFER
-                
-                successBodyBuffer.putInt(0);                // throttle_time_ms
-                successBodyBuffer.put((byte) 0);            // overall TAG_BUFFER
-                bodyBytes = successBodyBuffer.array();
-            }
+            ByteBuffer successBodyBuffer = ByteBuffer.allocate(22);
+            successBodyBuffer.order(ByteOrder.BIG_ENDIAN);
+            successBodyBuffer.putShort(errorCode);      // error_code = 0
+            successBodyBuffer.put((byte) 3);            // compact array length (2 entries + 1)
+            
+            // Entry 1: ApiVersions (api_key 18)
+            successBodyBuffer.putShort((short) 18);     // api_key
+            successBodyBuffer.putShort((short) 0);      // min_version
+            successBodyBuffer.putShort((short) 4);      // max_version
+            successBodyBuffer.put((byte) 0);            // entry TAG_BUFFER
+            
+            // Entry 2: DescribeTopicPartitions (api_key 75)
+            successBodyBuffer.putShort((short) 75);     // api_key
+            successBodyBuffer.putShort((short) 0);      // min_version
+            successBodyBuffer.putShort((short) 0);      // max_version
+            successBodyBuffer.put((byte) 0);            // entry TAG_BUFFER
+            
+            successBodyBuffer.putInt(0);                // throttle_time_ms
+            successBodyBuffer.put((byte) 0);            // overall TAG_BUFFER
+            bodyBytes = successBodyBuffer.array();
         }
+    }
 
         // Header part: correlation_id (4 bytes) + tag_buffer (1 byte)
         byte[] headerBytes = ByteBuffer.allocate(5)
