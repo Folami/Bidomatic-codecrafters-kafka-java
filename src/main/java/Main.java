@@ -282,147 +282,178 @@ public class Main {
     }
 
     /**
-     * Parses a DescribeTopicPartitions (v0) request body.
-     * The request body format is:
-     *  - topics: array of topics:
-     *       int16 topicsCount
-     *       For each topic:
-     *          string topic_name (2-byte length + UTF-8 bytes)
-     *          int32 partitionsCount
-     *          For each partition: int32 partition id
-     * Returns the topic name of the first valid topic, or null if none found.
+     * Result class for parsing DescribeTopicPartitions request, mimicking Python's parse_describe_topic_partitions.
      */
-    public static String parseDescribeTopicPartitionsRequest(InputStream in, int remaining) throws IOException {
-        int bytesConsumed = 0;
-        String firstTopicName = null;
-    
-        // Read topicsCount (INT16)
-        if (remaining < 2) {
-            System.err.println("P_DTP_R: Body too small for topicsCount (" + remaining + " bytes).");
-            if (remaining > 0) discardRemainingRequest(in, remaining);
-            return "";
+    public static class DescribeTopicPartitionsParseResult {
+        public final String topicName;
+        public final byte arrayLength;
+        public final byte topicNameLength;
+        public final byte cursor;
+
+        public DescribeTopicPartitionsParseResult(String topicName, byte arrayLength, byte topicNameLength, byte cursor) {
+            this.topicName = topicName;
+            this.arrayLength = arrayLength;
+            this.topicNameLength = topicNameLength;
+            this.cursor = cursor;
         }
-        byte[] topicsCountBytes = readNBytes(in, 2);
-        bytesConsumed += 2;
-        short topicsCount = ByteBuffer.wrap(topicsCountBytes).order(ByteOrder.BIG_ENDIAN).getShort();
-    
-        if (topicsCount < 0) {
-            System.err.println("P_DTP_R: Invalid topics_count " + topicsCount + ".");
-            if (remaining - bytesConsumed > 0) discardRemainingRequest(in, remaining - bytesConsumed);
-            return "";
-        }
-    
-        System.err.println("P_DTP_R: Expecting " + topicsCount + " topics.");
-    
-        for (int i = 0; i < topicsCount; i++) {
-            // Parse Topic Name (STRING)
-            if (remaining - bytesConsumed < 2) {
-                System.err.println("P_DTP_R: Not enough data for topic_name length (topic " + (i+1) + "). Remaining: " + (remaining - bytesConsumed));
-                break;
-            }
-            byte[] nameLenBytes = readNBytes(in, 2);
-            bytesConsumed += 2;
-            short nameLen = ByteBuffer.wrap(nameLenBytes).order(ByteOrder.BIG_ENDIAN).getShort();
-    
-            String currentTopicNameStr = "";
-            if (nameLen < 0) {
-                System.err.println("P_DTP_R: Invalid topic_name length " + nameLen + " for topic " + (i+1) + ". STRING requires >= 0.");
-            } else if (nameLen > 0) {
-                if (nameLen > remaining - bytesConsumed) {
-                    System.err.println("P_DTP_R: Stated topic_name length " + nameLen + " for topic " + (i+1) + " exceeds remaining body bytes " + (remaining - bytesConsumed) + ". Malformed.");
-                    if (firstTopicName == null) firstTopicName = "";
-                    break;
-                }
-                byte[] namePayloadBytes = readNBytes(in, nameLen);
-                bytesConsumed += nameLen;
-                try {
-                    currentTopicNameStr = new String(namePayloadBytes, StandardCharsets.UTF_8);
-                } catch (Exception e) {
-                    System.err.println("P_DTP_R: Topic_name for topic " + (i+1) + " had decode error. Treating as empty.");
-                }
-            }
-    
-            if (firstTopicName == null) {
-                firstTopicName = currentTopicNameStr;
-            }
-    
-            // Parse Partitions for this topic
-            if (remaining - bytesConsumed < 4) {
-                System.err.println("P_DTP_R: Not enough data for partitionsCount (topic " + (i+1) + "). Remaining: " + (remaining - bytesConsumed));
-                break;
-            }
-            byte[] partitionsCountBytes = readNBytes(in, 4);
-            bytesConsumed += 4;
-            int partitionsCount = ByteBuffer.wrap(partitionsCountBytes).order(ByteOrder.BIG_ENDIAN).getInt();
-    
-            if (partitionsCount < 0) {
-                System.err.println("P_DTP_R: Invalid partitions_count " + partitionsCount + " for topic " + (i+1) + ".");
-                break;
-            }
-    
-            int bytesForPartitionIds = partitionsCount * 4;
-            if (bytesForPartitionIds > 0) {
-                if (bytesForPartitionIds > remaining - bytesConsumed) {
-                    System.err.println("P_DTP_R: Stated " + bytesForPartitionIds + " bytes for partition IDs (topic " + (i+1) + ") exceeds remaining body bytes " + (remaining - bytesConsumed) + ". Malformed.");
-                    break;
-                }
-                discardRemainingRequest(in, bytesForPartitionIds);
-                bytesConsumed += bytesForPartitionIds;
-            }
-        }
-    
-        // Consume any remaining bytes
-        int unparsedBytes = remaining - bytesConsumed;
-        if (unparsedBytes > 0) {
-            System.err.println("P_DTP_R: Discarding " + unparsedBytes + " unparsed bytes from request body.");
-            discardRemainingRequest(in, unparsedBytes);
-        } else if (unparsedBytes < 0) {
-            System.err.println("P_DTP_R: WARNING - Consumed " + bytesConsumed + " bytes, but initial remaining was " + remaining + ".");
-        }
-    
-        String parsedTopicName = (firstTopicName != null) ? firstTopicName : "";
-        System.err.println("P_DTP_R: Parsed first topic='" + parsedTopicName + "'");
-        return parsedTopicName;
     }
 
     /**
-     * Builds a DescribeTopicPartitions (v0) response for an unknown topic.
-     * The response body is:
-     *   - error_code: INT16 (2 bytes) = 3 (UNKNOWN_TOPIC_OR_PARTITION)
-     *   - topic_name: STRING (INT16 length + UTF-8 bytes)
-     *   - topic_id: 16 bytes of zeros (UUID all zeros)
-     *   - partitions: int32 count = 0 (empty array)
-    */
-    public static byte[] buildDescribeTopicPartitionsResponse(int correlationId, String topic) {
-        if (topic == null) {
-            topic = ""; // Default to empty string if null
+     * Parses a DescribeTopicPartitions (v0) request body, mimicking Python's parse_describe_topic_partitions.
+     * The request body format (compact, as per Python):
+     *  - topics: compact array of topics:
+     *       int8 topicsCount (1 byte)
+     *       For each topic:
+     *          string topic_name (1-byte length + UTF-8 bytes)
+     *          int32 partitionsCount
+     *          For each partition: int32 partition id
+     * Returns the first topic name, array_length, topic_name_length, and cursor.
+     */
+    public static DescribeTopicPartitionsParseResult parseDescribeTopicPartitionsRequest(
+            InputStream in, 
+            int remaining, 
+            int clientIdLen
+        ) throws IOException {
+        int bytesConsumed = 0;
+        byte arrayLength = 0;
+        byte topicNameLength = 0;
+        byte cursor = 0;
+        String topicName = "";
+
+        // Read array_length (1 byte, compact)
+        if (remaining < 1) {
+            System.err.println("P_DTP_R: Body too small for array_length (" + remaining + " bytes).");
+            return new DescribeTopicPartitionsParseResult("", (byte) 0, (byte) 0, (byte) 0);
         }
-        // Fixed topic_id: 16 bytes of zeros (UUID 00000000-0000-0000-0000-000000000000)
+        byte[] arrayLengthBytes = readNBytes(in, 1);
+        arrayLength = arrayLengthBytes[0];
+        bytesConsumed += 1;
+        System.err.println("P_DTP_R: array_length=" + (arrayLength & 0xFF));
+
+        // Read topic_name_length (1 byte, compact)
+        if (remaining - bytesConsumed < 1) {
+            System.err.println("P_DTP_R: Not enough data for topic_name_length. Remaining: " + (remaining - bytesConsumed));
+            return new DescribeTopicPartitionsParseResult("", arrayLength, (byte) 0, (byte) 0);
+        }
+        byte[] topicNameLengthBytes = readNBytes(in, 1);
+        topicNameLength = topicNameLengthBytes[0];
+        bytesConsumed += 1;
+        System.err.println("P_DTP_R: topic_name_length=" + (topicNameLength & 0xFF));
+
+        // Read topic_name (topicNameLength - 1 bytes, to match Python bug)
+        int topicBytesToRead = (topicNameLength & 0xFF) - 1;
+        if (topicBytesToRead > 0) {
+            if (topicBytesToRead > remaining - bytesConsumed) {
+                System.err.println("P_DTP_R: Stated topic_name length " + topicBytesToRead + " exceeds remaining bytes " + (remaining - bytesConsumed));
+                return new DescribeTopicPartitionsParseResult("", arrayLength, topicNameLength, (byte) 0);
+            }
+            byte[] topicNameBytes = readNBytes(in, topicBytesToRead);
+            bytesConsumed += topicBytesToRead;
+            try {
+                topicName = new String(topicNameBytes, StandardCharsets.UTF_8);
+            } catch (Exception e) {
+                System.err.println("P_DTP_R: Topic_name decode error: " + e.getMessage());
+                topicName = "";
+            }
+        }
+        System.err.println("P_DTP_R: topic_name='" + topicName + "'");
+
+        // Skip to cursor (topic_name_starter + topic_name_length + 4)
+        int cursorOffset = 14 + clientIdLen + 1 + 2 + (topicNameLength & 0xFF) + 4;
+        int bytesToSkip = cursorOffset - (14 + clientIdLen + 1 + bytesConsumed);
+        if (bytesToSkip > 0) {
+            if (bytesToSkip > remaining - bytesConsumed) {
+                System.err.println("P_DTP_R: Cannot skip " + bytesToSkip + " bytes to cursor. Remaining: " + (remaining - bytesConsumed));
+                return new DescribeTopicPartitionsParseResult(topicName, arrayLength, topicNameLength, (byte) 0);
+            }
+            discardRemainingRequest(in, bytesToSkip);
+            bytesConsumed += bytesToSkip;
+        }
+
+        // Read cursor (1 byte)
+        if (remaining - bytesConsumed >= 1) {
+            byte[] cursorBytes = readNBytes(in, 1);
+            cursor = cursorBytes[0];
+            bytesConsumed += 1;
+            System.err.println("P_DTP_R: cursor=" + (cursor & 0xFF));
+        } else {
+            System.err.println("P_DTP_R: Not enough data for cursor. Remaining: " + (remaining - bytesConsumed));
+        }
+
+        // Discard remaining bytes
+        int unparsedBytes = remaining - bytesConsumed;
+        if (unparsedBytes > 0) {
+            System.err.println("P_DTP_R: Discarding " + unparsedBytes + " unparsed bytes.");
+            discardRemainingRequest(in, unparsedBytes);
+        }
+
+        return new DescribeTopicPartitionsParseResult(topicName, arrayLength, topicNameLength, cursor);
+    }
+
+    /**
+     * Builds a DescribeTopicPartitions (v0) response for an unknown topic, mimicking Python's response_api_key_75.
+     * The response body includes flexible-format fields to match tester expectations:
+     *   - throttle_time_ms: INT32 (0)
+     *   - array_length: 1 byte (compact array length)
+     *   - error_code: INT16 (3, UNKNOWN_TOPIC_OR_PARTITION)
+     *   - topic_name_length: 1 byte (compact string length)
+     *   - topic_name: UTF-8 bytes
+     *   - topic_id: 16 bytes of zeros
+     *   - is_internal: BOOLEAN (0)
+     *   - partition_array: 1 byte (compact array length, 1 for empty)
+     *   - topic_authorized_operations: INT32 (0x00000df8)
+     *   - topic_tag_buffer: 1 byte (0x00)
+     *   - cursor: 1 byte
+     *   - response_tag_buffer: 1 byte (0x00)
+     */
+    public static byte[] buildDescribeTopicPartitionsResponse(
+            int correlationId, String topic, byte arrayLength, byte topicNameLength, byte cursor) {
+        if (topic == null) {
+            topic = "";
+        }
+        System.err.println("build_describe_topic_partitions_response: topic_name='" + topic +
+                           "', array_length=" + (arrayLength & 0xFF) +
+                           ", topic_name_length=" + (topicNameLength & 0xFF) +
+                           ", cursor=" + (cursor & 0xFF));
+
+        byte[] throttleTimeMsBytes = ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN).putInt(0).array();
+        byte[] arrayLengthBytes = new byte[]{arrayLength};
+        byte[] errorCodeBytes = ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 3).array();
+        byte[] topicNameLengthBytes = new byte[]{topicNameLength};
+        byte[] topicNameBytes = topic.getBytes(StandardCharsets.UTF_8);
         byte[] topicId = new byte[16];
-        byte[] partitions_count_bytes = ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN).putInt(0).array(); // partitions_count = 0
-           
-        // To satisfy the tester, include 'flexible' response parts, even for v0:
-        byte[] throttleTimeMsBytes = ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN).putInt(0).array(); // throttle_time_ms
-        byte[] trailingTagBuffer = new byte[]{0x00}; // Tag buffer (0 tags, encoded as 0)
-    
+        byte[] isInternal = new byte[]{(byte) 0};
+        byte[] partitionArray = new byte[]{(byte) 1};
+        byte[] topicAuthorizedOperations = new byte[]{(byte) 0x00, (byte) 0x00, (byte) 0x0d, (byte) 0xf8};
+        byte[] tagBuffer = new byte[]{(byte) 0};
+        byte[] cursorBytes = new byte[]{cursor};
+
         byte[] responseBody = concatenateByteArrays(
-            // errorCodeBytes,
+            throttleTimeMsBytes,
+            arrayLengthBytes,
+            errorCodeBytes,
+            topicNameLengthBytes,
+            topicNameBytes,
             topicId,
-            partitions_count_bytes
+            isInternal,
+            partitionArray,
+            topicAuthorizedOperations,
+            tagBuffer,
+            cursorBytes,
+            tagBuffer
         );
-        // Add 'flexible' elements to the body:
-        responseBody = concatenateByteArrays(throttleTimeMsBytes, responseBody, trailingTagBuffer);
-        
-        // Response Header (Correlation ID + Tagged Fields)
-        ByteBuffer responseHeaderBuffer = ByteBuffer.allocate(5).order(ByteOrder.BIG_ENDIAN);
-        responseHeaderBuffer.putInt(correlationId); // Correlation ID
-        responseHeaderBuffer.put((byte) 0x00);       // Header Tagged Fields (0 tags)
-        byte[] responseHeader = responseHeaderBuffer.array();
-        int messageSizeField = responseHeader.length + responseBody.length;
-        ByteBuffer buffer = ByteBuffer.allocate(4 + messageSizeField);
+
+        byte[] responseHeader = ByteBuffer.allocate(5).order(ByteOrder.BIG_ENDIAN)
+            .putInt(correlationId)
+            .put((byte) 0)
+            .array();
+        int messageSize = responseHeader.length + responseBody.length;
+
+        ByteBuffer buffer = ByteBuffer.allocate(4 + messageSize);
         buffer.order(ByteOrder.BIG_ENDIAN);
-        buffer.putInt(messageSizeField); // message_length
-        buffer.put(responseHeader).put(responseBody);
+        buffer.putInt(messageSize);
+        buffer.put(responseHeader);
+        buffer.put(responseBody);
         return buffer.array();
     }
     
@@ -443,80 +474,132 @@ public class Main {
     }
 
     /**
-     * Handles an individual client connection.
-     * <p>
-     * This method processes multiple sequential requests from the same client.
-     * For each request, it reads the 12-byte header and discards any extra request data.
-     * Then, if the api_key is 18, it sends back an ApiVersions response.
-     * Otherwise, it logs that the api_key is unknown.
-     * The loop terminates when the client disconnects or an error occurs.
+     * Handles an individual client connection, mimicking Python's handle_client.
+     * Processes multiple sequential requests from the same client.
      */
     public static void handleClient(Socket clientSocket) {
+        class ParseResult {
+            final short apiKey;
+            final short apiVersion;
+            final int correlationId;
+            final String clientId;
+            final int clientIdLen;
+            final int bodySize;
+
+            ParseResult(short apiKey, short apiVersion, int correlationId, String clientId, int clientIdLen, int bodySize) {
+                this.apiKey = apiKey;
+                this.apiVersion = apiVersion;
+                this.correlationId = correlationId;
+                this.clientId = clientId;
+                this.clientIdLen = clientIdLen;
+                this.bodySize = bodySize;
+            }
+        }
+
+        ParseResult parseRequestHeader(InputStream in) throws IOException {
+            FullRequestHeader header = readFullRequestHeader(in);
+            System.err.println("parse_request_header: api_key=" + header.apiKey +
+                               ", api_version=" + header.apiVersion +
+                               ", correlation_id=" + header.correlationId);
+            return new ParseResult(header.apiKey, header.apiVersion, header.correlationId,
+                                   header.clientId, header.clientIdFieldLengthBytes, header.bodySize);
+        }
+
+        byte parseTaggedField(InputStream in, int remaining) throws IOException {
+            if (remaining < 1) {
+                System.err.println("parse_tagged_field: Not enough data for tagged field. Remaining: " + remaining);
+                return 0;
+            }
+            byte[] taggedBytes = readNBytes(in, 1);
+            System.err.println("parse_tagged_field: tagged=" + (taggedBytes[0] & 0xFF));
+            return taggedBytes[0];
+        }
+
+        void handleApiVersionsRequest(OutputStream out, int correlationId, short apiVersion, int bodySize, InputStream in) throws IOException {
+            if (bodySize > 0) {
+                discardRemainingRequest(in, bodySize);
+                System.err.println("Discarded " + bodySize + " bytes from ApiVersions request body.");
+            }
+            byte[] response = buildApiVersionsInternalResponse(correlationId, apiVersion);
+            out.write(response);
+            out.flush();
+            System.err.println("Sent ApiVersions response (" + response.length + " bytes)");
+        }
+
+        void handleDescribeTopicPartitionsRequest(
+            OutputStream out, 
+            int correlationId,
+            short apiVersion, 
+            int bodySize, 
+            InputStream in, 
+            int clientIdLen
+        ) throws IOException {
+            if (apiVersion != 0) {
+                System.err.println("Unsupported DescribeTopicPartitions version: " + apiVersion + ". Discarding body.");
+                if (bodySize > 0) {
+                    discardRemainingRequest(in, bodySize);
+                }
+                return;
+            }
+            // Read tagged field after client_id
+            int remaining = bodySize;
+            byte tagged = parseTaggedField(in, remaining);
+            remaining -= 1;
+            DescribeTopicPartitionsParseResult parseResult;
+            try {
+                parseResult = parseDescribeTopicPartitionsRequest(in, remaining, clientIdLen);
+                System.err.println("Parsed DescribeTopicPartitions v0 request for topic: '" + parseResult.topicName + "'");
+            } catch (IOException e) {
+                System.err.println("Error parsing DescribeTopicPartitions v0 request: " + e.getMessage());
+                parseResult = new DescribeTopicPartitionsParseResult("", (byte) 0, (byte) 0, (byte) 0);
+            }
+            byte[] response = buildDescribeTopicPartitionsResponse(
+                correlationId, parseResult.topicName, parseResult.arrayLength, parseResult.topicNameLength, parseResult.cursor);
+            out.write(response);
+            out.flush();
+            System.err.println("Sent DescribeTopicPartitions v0 response (" + response.length + " bytes)");
+        }
+
+        void handleUnknownRequest(int apiKey, int bodySize, InputStream in) throws IOException {
+            System.err.println("Unknown api_key " + apiKey + ", skipping.");
+            if (bodySize > 0) {
+                discardRemainingRequest(in, bodySize);
+                System.err.println("Discarded " + bodySize + " bytes from unknown request.");
+            }
+        }
+
         try {
-            InputStream clientInputStream = clientSocket.getInputStream();
-            OutputStream clientOutputStream = clientSocket.getOutputStream();
+            InputStream in = clientSocket.getInputStream();
+            OutputStream out = clientSocket.getOutputStream();
             while (true) {
-                byte[] response = null;
-                FullRequestHeader fullHeader;
+                ParseResult header;
                 try {
-                    fullHeader = readFullRequestHeader(clientInputStream);
-                } catch (IOException ioe) {
-                    System.err.println("IOException while reading header, closing connection: " + ioe.getMessage());
+                    header = parseRequestHeader(in);
+                } catch (IOException e) {
+                    System.err.println("IOException while reading header, closing connection: " + e.getMessage());
                     break;
                 } catch (Exception e) {
                     System.err.println("Error reading full request header: " + e.getMessage());
                     break;
                 }
-                System.err.println("Received correlation_id: " + fullHeader.correlationId
-                        + ", requested api_version: " + fullHeader.apiVersion
-                        + ", api_key: " + fullHeader.apiKey);
-                System.err.println("Received request messageSize (payload after size field): " + fullHeader.messageSize);
-                System.err.println("Client ID: '" + fullHeader.clientId + "', Client ID field length: " + fullHeader.clientIdFieldLengthBytes);
-                System.err.println("Calculated request bodySize: " + fullHeader.bodySize);
-    
-                if (fullHeader.bodySize < 0) {
-                    System.err.println("Error: Calculated negative bodySize (" + fullHeader.bodySize + "). Protocol error or parsing issue.");
+                System.err.println("Received correlation_id: " + header.correlationId +
+                                   ", requested api_version: " + header.apiVersion +
+                                   ", api_key: " + header.apiKey +
+                                   ", client_id: '" + header.clientId + "'" +
+                                   ", client_id_length: " + header.clientIdLen +
+                                   ", body_size: " + header.bodySize);
+
+                if (header.bodySize < 0) {
+                    System.err.println("Error: Calculated negative bodySize (" + header.bodySize + "). Protocol error or parsing issue.");
                     break;
                 }
-    
-                if (fullHeader.apiKey == 18) {
-                    if (fullHeader.bodySize > 0) {
-                        discardRemainingRequest(clientInputStream, fullHeader.bodySize);
-                        System.err.println("Discarded " + fullHeader.bodySize + " bytes from ApiVersions request body.");
-                    }
-                    // Call the consolidated method that handles both success and error based on version
-                    response = buildApiVersionsInternalResponse(fullHeader.correlationId, fullHeader.apiVersion);
-                    System.err.println("Prepared ApiVersions response (" + (response != null ? response.length : 0) + " bytes)");
-                } else if (fullHeader.apiKey == 75) {
-                    if (fullHeader.apiVersion == 0) {
-                        String topicName;
-                        try {
-                            topicName = parseDescribeTopicPartitionsRequest(clientInputStream, fullHeader.bodySize);
-                            System.err.println("Parsed DescribeTopicPartitions v0 request for topic: '" + topicName + "'");
-                        } catch (IOException e) {
-                            System.err.println("Error parsing DescribeTopicPartitions v0 request: " + e.getMessage());
-                            topicName = ""; // Fallback on parsing error
-                        }
-                        response = buildDescribeTopicPartitionsResponse(fullHeader.correlationId, topicName);
-                        System.err.println("Prepared DescribeTopicPartitions v0 (Unknown Topic) response (" + (response != null ? response.length : 0) + " bytes)");
-                    } else {
-                        System.err.println("Unsupported DescribeTopicPartitions version: " + fullHeader.apiVersion + ". Discarding body.");
-                        if (fullHeader.bodySize > 0) {
-                            discardRemainingRequest(clientInputStream, fullHeader.bodySize);
-                        }
-                        // No response for unsupported version, response remains null
-                    }
-                } else {
-                    System.err.println("Unknown api_key " + fullHeader.apiKey + ", skipping.");
-                    if (fullHeader.bodySize > 0) {
-                        discardRemainingRequest(clientInputStream, fullHeader.bodySize);
-                        System.err.println("Discarded " + fullHeader.bodySize + " bytes from unknown request.");
-                    }
-                }
 
-                if (response != null) {
-                    clientOutputStream.write(response);
-                    clientOutputStream.flush();
+                if (header.apiKey == 18) {
+                    handleApiVersionsRequest(out, header.correlationId, header.apiVersion, header.bodySize, in);
+                } else if (header.apiKey == 75) {
+                    handleDescribeTopicPartitionsRequest(out, header.correlationId, header.apiVersion, header.bodySize, in, header.clientIdLen);
+                } else {
+                    handleUnknownRequest(header.apiKey, header.bodySize, in);
                 }
             }
         } catch (Throwable t) {
@@ -578,8 +661,6 @@ public class Main {
         }
     }
 }
-
-
 
 
 
