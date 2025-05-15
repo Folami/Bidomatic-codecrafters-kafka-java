@@ -406,7 +406,7 @@ public class Main {
         byte[] trailingTagBuffer = new byte[]{0x00}; // Tag buffer (0 tags, encoded as 0)
     
         byte[] responseBody = concatenateByteArrays(
-            errorCodeBytes,
+            // errorCodeBytes,
             topicId,
             partitions_count_bytes
         );
