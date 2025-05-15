@@ -523,7 +523,10 @@ public class Main {
         }
 
         static void handleDescribeTopicPartitionsRequest(
-                OutputStream out, int correlationId, short apiVersion, int bodySize, InputStream in, int clientIdLen) throws IOException {
+            OutputStream out, int correlationId, 
+            short apiVersion, int bodySize, 
+            InputStream in, int clientIdLen
+        ) throws IOException {
             if (apiVersion != 0) {
                 System.err.println("Unsupported DescribeTopicPartitions version: " + apiVersion + ". Discarding body.");
                 if (bodySize > 0) {
