@@ -1,9 +1,14 @@
 import java.io.*;
-import java.nio.*;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.util.*;
 
+// Helper classes from previous prompt, with fixes
 class TopicMetadata {
     String name;
     UUID topicId;
@@ -30,7 +35,7 @@ class PartitionMetadata {
 
 class ClusterMetadataReader {
     private static final String METADATA_LOG_PATH = "/tmp/kraft-combined-logs/__cluster_metadata-0/00000000000000000000.log";
-    private Map<String, TopicMetadata> topicMetadataMap = new HashMap<>();
+    private final Map<String, TopicMetadata> topicMetadataMap = new HashMap<>();
     
     public ClusterMetadataReader() {
         try {
@@ -54,21 +59,16 @@ class ClusterMetadataReader {
             buffer.flip();
             
             while (buffer.hasRemaining()) {
-                // Try to read a record batch
-                if (buffer.remaining() < 8) break; // Need at least 8 bytes for baseOffset
+                if (buffer.remaining() < 12) break; // Need 8 (baseOffset) + 4 (batchLength)
                 
                 long baseOffset = buffer.getLong();
-                if (buffer.remaining() < 4) break; // Need at least 4 bytes for batchLength
-                
                 int batchLength = buffer.getInt();
-                if (buffer.remaining() < batchLength) break; // Not enough data for the batch
+                if (buffer.remaining() < batchLength) break;
                 
-                // Create a slice for this batch
                 ByteBuffer batchBuffer = buffer.slice();
                 batchBuffer.limit(batchLength);
                 buffer.position(buffer.position() + batchLength);
                 
-                // Process the batch
                 processBatch(batchBuffer);
             }
         }
@@ -82,56 +82,24 @@ class ClusterMetadataReader {
     
     private void processBatch(ByteBuffer buffer) {
         try {
-            // Skip partitionLeaderEpoch (4 bytes)
-            if (buffer.remaining() < 4) return;
-            buffer.position(buffer.position() + 4);
-            
-            // Read magic byte
-            if (buffer.remaining() < 1) return;
+            if (buffer.remaining() < 29) return; // Minimum batch header size
+            buffer.position(buffer.position() + 4); // Skip partitionLeaderEpoch
             byte magic = buffer.get();
             if (magic != 2) {
                 System.err.println("Unsupported magic byte: " + magic);
                 return;
             }
+            buffer.position(buffer.position() + 4); // Skip crc
+            buffer.position(buffer.position() + 2); // Skip attributes
+            buffer.position(buffer.position() + 4); // Skip lastOffsetDelta
+            buffer.position(buffer.position() + 8); // Skip firstTimestamp
+            buffer.position(buffer.position() + 8); // Skip maxTimestamp
+            buffer.position(buffer.position() + 8); // Skip producerId
+            buffer.position(buffer.position() + 2); // Skip producerEpoch
+            buffer.position(buffer.position() + 4); // Skip baseSequence
             
-            // Skip CRC (4 bytes)
-            if (buffer.remaining() < 4) return;
-            buffer.position(buffer.position() + 4);
-            
-            // Skip attributes (2 bytes)
-            if (buffer.remaining() < 2) return;
-            buffer.position(buffer.position() + 2);
-            
-            // Skip lastOffsetDelta (4 bytes)
-            if (buffer.remaining() < 4) return;
-            buffer.position(buffer.position() + 4);
-            
-            // Skip firstTimestamp (8 bytes)
-            if (buffer.remaining() < 8) return;
-            buffer.position(buffer.position() + 8);
-            
-            // Skip maxTimestamp (8 bytes)
-            if (buffer.remaining() < 8) return;
-            buffer.position(buffer.position() + 8);
-            
-            // Skip producerId (8 bytes)
-            if (buffer.remaining() < 8) return;
-            buffer.position(buffer.position() + 8);
-            
-            // Skip producerEpoch (2 bytes)
-            if (buffer.remaining() < 2) return;
-            buffer.position(buffer.position() + 2);
-            
-            // Skip baseSequence (4 bytes)
-            if (buffer.remaining() < 4) return;
-            buffer.position(buffer.position() + 4);
-            
-            // Read records count
-            if (buffer.remaining() < 4) return;
             int recordsCount = buffer.getInt();
-            
-            // Process each record in the batch
-            for (int i = 0; i < recordsCount; i++) {
+            for (int i = 0; i < recordsCount && buffer.hasRemaining(); i++) {
                 processRecord(buffer);
             }
         } catch (Exception e) {
@@ -139,35 +107,50 @@ class ClusterMetadataReader {
         }
     }
     
+    private int readVarInt(ByteBuffer buffer) {
+        int value = 0;
+        int shift = 0;
+        while (buffer.hasRemaining()) {
+            byte b = buffer.get();
+            value |= (b & 0x7F) << shift;
+            if ((b & 0x80) == 0) {
+                return value;
+            }
+            shift += 7;
+            if (shift > 28) {
+                throw new RuntimeException("Invalid VARINT: too many bytes");
+            }
+        }
+        throw new RuntimeException("Incomplete VARINT");
+    }
+    
     private void processRecord(ByteBuffer buffer) {
         try {
-            // Skip record length and attributes
             if (buffer.remaining() < 1) return;
-            int recordHeaderSize = buffer.get() & 0xFF;
-            if (buffer.remaining() < recordHeaderSize) return;
-            buffer.position(buffer.position() + recordHeaderSize);
+            int recordLength = readVarInt(buffer);
+            if (buffer.remaining() < recordLength) return;
             
-            // Read key length
-            if (buffer.remaining() < 4) return;
-            int keyLength = buffer.getInt();
-            if (keyLength <= 0 || buffer.remaining() < keyLength) return;
+            int startPos = buffer.position();
+            int attributes = readVarInt(buffer);
+            readVarInt(buffer); // timestampDelta
+            readVarInt(buffer); // offsetDelta
             
-            // Read key
+            int keyLength = readVarInt(buffer);
+            if (keyLength < 0 || buffer.remaining() < keyLength) return;
             byte[] keyBytes = new byte[keyLength];
             buffer.get(keyBytes);
             
-            // Read value length
-            if (buffer.remaining() < 4) return;
-            int valueLength = buffer.getInt();
-            if (valueLength < 0 || buffer.remaining() < valueLength) return;
-            
-            // Read value
-            byte[] valueBytes = new byte[valueLength];
-            if (valueLength > 0) {
+            int valueLength = readVarInt(buffer);
+            byte[] valueBytes;
+            if (valueLength >= 0) {
+                if (buffer.remaining() < valueLength) return;
+                valueBytes = new byte[valueLength];
                 buffer.get(valueBytes);
+            } else {
+                valueBytes = new byte[0];
             }
             
-            // Process key and value
+            buffer.position(startPos + recordLength);
             processMetadataRecord(ByteBuffer.wrap(keyBytes), ByteBuffer.wrap(valueBytes));
         } catch (Exception e) {
             System.err.println("Error processing record: " + e.getMessage());
@@ -176,51 +159,38 @@ class ClusterMetadataReader {
     
     private void processMetadataRecord(ByteBuffer keyBuffer, ByteBuffer valueBuffer) {
         try {
-            // Check if this is a topic metadata record
             if (keyBuffer.remaining() < 4) return;
             short keyVersion = keyBuffer.getShort();
             short resourceType = keyBuffer.getShort();
             
-            // ResourceType 1 is for topics
-            if (resourceType == 1) {
-                // Read topic name
+            if (resourceType == 1) { // Topic
                 if (keyBuffer.remaining() < 2) return;
                 short nameLength = keyBuffer.getShort();
                 if (nameLength <= 0 || keyBuffer.remaining() < nameLength) return;
                 
                 byte[] nameBytes = new byte[nameLength];
                 keyBuffer.get(nameBytes);
-                String topicName = new String(nameBytes, "UTF-8");
+                String topicName = new String(nameBytes, StandardCharsets.UTF_8);
                 
-                // Skip if value is empty (tombstone record)
-                if (valueBuffer.remaining() <= 0) return;
+                if (valueBuffer.remaining() <= 0) return; // Tombstone
                 
-                // Read value
-                if (valueBuffer.remaining() < 2) return;
+                if (valueBuffer.remaining() < 22) return;
                 short valueVersion = valueBuffer.getShort();
-                
-                // Read topic ID (UUID)
-                if (valueBuffer.remaining() < 16) return;
                 long mostSigBits = valueBuffer.getLong();
                 long leastSigBits = valueBuffer.getLong();
                 UUID topicId = new UUID(mostSigBits, leastSigBits);
-                
-                // Read number of partitions
-                if (valueBuffer.remaining() < 4) return;
                 int numPartitions = valueBuffer.getInt();
                 
-                // Create topic metadata
                 TopicMetadata topicMetadata = new TopicMetadata(topicName, topicId);
-                
-                // For simplicity, we'll create a partition with index 0
                 if (numPartitions > 0) {
-                    PartitionMetadata partitionMetadata = new PartitionMetadata(0, 0, 0);
-                    partitionMetadata.isr.add(0); // Add broker 0 to ISR
-                    topicMetadata.partitions.add(partitionMetadata);
+                    PartitionMetadata partition = new PartitionMetadata(0, 0, 0);
+                    partition.isr.add(0);
+                    topicMetadata.partitions.add(partition);
                 }
                 
-                // Store the topic metadata
-                topicMetadataMap.put(topicName, topicMetadata);
+                synchronized (topicMetadataMap) {
+                    topicMetadataMap.put(topicName, topicMetadata);
+                }
                 System.err.println("Found topic: " + topicName + " with ID: " + topicId);
             }
         } catch (Exception e) {
@@ -228,11 +198,11 @@ class ClusterMetadataReader {
         }
     }
     
-    public TopicMetadata getTopicMetadata(String topicName) {
+    public synchronized TopicMetadata getTopicMetadata(String topicName) {
         return topicMetadataMap.get(topicName);
     }
     
-    public boolean topicExists(String topicName) {
+    public synchronized boolean topicExists(String topicName) {
         return topicMetadataMap.containsKey(topicName);
     }
 }

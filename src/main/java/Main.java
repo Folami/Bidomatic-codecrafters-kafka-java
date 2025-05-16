@@ -30,20 +30,23 @@ import java.nio.charset.StandardCharsets;
  * </ul>
  */
 public class Main {
-    // private static ClusterMetadataReader metadataReader;
+    private static ClusterMetadataReader metadataReader;
 
     /**
-     * Encodes a Java String into Kafka's STRING format (INT16 length + UTF-8 bytes).
+     * Encodes a Java String into Kafka's COMPACT_STRING format (1-byte length + UTF-8 bytes).
      * A null string is encoded as INT16 -1.
      * @param s the string to encode.
      * @return the encoded bytes.
      */
     public static byte[] encodeKafkaString(String s) {
         if (s == null) {
-            return ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) -1).array();
+            return new byte[]{(byte) 1}; // Length=1 (empty)
         }
         byte[] utf8Bytes = s.getBytes(StandardCharsets.UTF_8);
-        return ByteBuffer.allocate(2 + utf8Bytes.length).order(ByteOrder.BIG_ENDIAN).putShort((short) utf8Bytes.length).put(utf8Bytes).array();
+        byte[] result = new byte[1 + utf8Bytes.length];
+        result[0] = (byte) (utf8Bytes.length + 1);
+        System.arraycopy(utf8Bytes, 0, result, 1, utf8Bytes.length);
+        return result;
     }
 
     /**
@@ -391,20 +394,31 @@ public class Main {
     }
 
     /**
-     * Builds a DescribeTopicPartitions (v0) response for an unknown topic, mimicking Python's response_api_key_75.
-     * The response body includes flexible-format fields to match tester expectations:
-     *   - throttle_time_ms: INT32 (0)
-     *   - array_length: 1 byte (compact array length)
-     *   - error_code: INT16 (3, UNKNOWN_TOPIC_OR_PARTITION)
-     *   - topic_name_length: 1 byte (compact string length)
+     * Builds a DescribeTopicPartitions (v0) response, supporting both known and unknown topics.
+     * Uses ClusterMetadataReader to check topic existence and retrieve metadata.
+     * Response format (flexible, mimics v1+):
+     * - throttle_time_ms: INT32 (0)
+     * - topics: COMPACT_ARRAY
+     *   - array_length: 1 byte
+     *   - error_code: INT16 (0 for known, 3 for unknown)
+     *   - topic_name_length: 1 byte
      *   - topic_name: UTF-8 bytes
-     *   - topic_id: 16 bytes of zeros
+     *   - topic_id: UUID (16 bytes, from metadata or zeros)
      *   - is_internal: BOOLEAN (0)
-     *   - partition_array: 1 byte (compact array length, 1 for empty)
+     *   - partitions: COMPACT_ARRAY
+     *     - array_length: 1 byte (2 for 1 partition, 1 for empty)
+     *     - partition_index: INT32
+     *     - error_code: INT16 (0)
+     *     - leader_id: INT32
+     *     - leader_epoch: INT32
+     *     - replica_nodes: COMPACT_ARRAY of INT32
+     *     - isr_nodes: COMPACT_ARRAY of INT32
+     *     - offline_replicas: COMPACT_ARRAY of INT32
+     *     - tagged_fields: 1 byte (0)
      *   - topic_authorized_operations: INT32 (0x00000df8)
-     *   - topic_tag_buffer: 1 byte (0x00)
-     *   - cursor: 1 byte
-     *   - response_tag_buffer: 1 byte (0x00)
+     *   - tagged_fields: 1 byte (0)
+     * - cursor: 1 byte
+     * - tagged_fields: 1 byte (0)
      */
     public static byte[] buildDescribeTopicPartitionsResponse(
             int correlationId, String topic, byte arrayLength, byte topicNameLength, byte cursor) {
@@ -416,32 +430,68 @@ public class Main {
                            ", topic_name_length=" + (topicNameLength & 0xFF) +
                            ", cursor=" + (cursor & 0xFF));
 
-        byte[] throttleTimeMsBytes = ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN).putInt(0).array();
-        byte[] arrayLengthBytes = new byte[]{arrayLength};
-        byte[] errorCodeBytes = ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 3).array();
-        byte[] topicNameLengthBytes = new byte[]{topicNameLength};
-        byte[] topicNameBytes = topic.getBytes(StandardCharsets.UTF_8);
-        byte[] topicId = new byte[16];
-        byte[] isInternal = new byte[]{(byte) 0};
-        byte[] partitionArray = new byte[]{(byte) 1};
-        byte[] topicAuthorizedOperations = new byte[]{(byte) 0x00, (byte) 0x00, (byte) 0x0d, (byte) 0xf8};
-        byte[] tagBuffer = new byte[]{(byte) 0};
-        byte[] cursorBytes = new byte[]{cursor};
+        ByteBuffer bodyBuffer = ByteBuffer.allocate(1024); // Allocate enough for known/unknown cases
+        bodyBuffer.order(ByteOrder.BIG_ENDIAN);
 
-        byte[] responseBody = concatenateByteArrays(
-            throttleTimeMsBytes,
-            arrayLengthBytes,
-            errorCodeBytes,
-            topicNameLengthBytes,
-            topicNameBytes,
-            topicId,
-            isInternal,
-            partitionArray,
-            topicAuthorizedOperations,
-            tagBuffer,
-            cursorBytes,
-            tagBuffer
-        );
+        // Common fields
+        bodyBuffer.putInt(0); // throttle_time_ms
+        bodyBuffer.put(arrayLength); // topics_array_length
+
+        // Topic entry
+        TopicMetadata metadata = metadataReader.getTopicMetadata(topic);
+        boolean isKnown = metadata != null && metadataReader.topicExists(topic);
+        short errorCode = isKnown ? (short) 0 : (short) 3;
+
+        bodyBuffer.putShort(errorCode);
+        bodyBuffer.put(encodeKafkaString(topic)); // topic_name (COMPACT_STRING)
+        
+        // topic_id
+        if (isKnown) {
+            bodyBuffer.putLong(metadata.topicId.getMostSignificantBits());
+            bodyBuffer.putLong(metadata.topicId.getLeastSignificantBits());
+        } else {
+            bodyBuffer.put(new byte[16]); // Zeroed UUID
+        }
+
+        bodyBuffer.put((byte) 0); // is_internal
+
+        // Partitions array
+        if (isKnown && !metadata.partitions.isEmpty()) {
+            bodyBuffer.put((byte) 2); // partitions_array_length (1 partition + 1)
+            PartitionMetadata partition = metadata.partitions.get(0);
+            
+            bodyBuffer.putInt(partition.partitionIndex); // partition_index
+            bodyBuffer.putShort((short) 0); // error_code
+            bodyBuffer.putInt(partition.leaderId); // leader_id
+            bodyBuffer.putInt(partition.leaderEpoch); // leader_epoch
+            
+            // replica_nodes (assume [0] per metadata)
+            bodyBuffer.put((byte) 2); // length=1+1
+            bodyBuffer.putInt(0);
+            
+            // isr_nodes
+            bodyBuffer.put((byte) (partition.isr.size() + 1));
+            for (Integer node : partition.isr) {
+                bodyBuffer.putInt(node);
+            }
+            
+            // offline_replicas (empty)
+            bodyBuffer.put((byte) 1);
+            
+            bodyBuffer.put((byte) 0); // partition tagged_fields
+        } else {
+            bodyBuffer.put((byte) 1); // empty partitions array
+        }
+
+        bodyBuffer.putInt(0x00000df8); // topic_authorized_operations
+        bodyBuffer.put((byte) 0); // topic_tag_buffer
+        bodyBuffer.put(cursor); // cursor
+        bodyBuffer.put((byte) 0); // response_tag_buffer
+
+        // Trim buffer to actual size
+        byte[] responseBody = new byte[bodyBuffer.position()];
+        bodyBuffer.flip();
+        bodyBuffer.get(responseBody);
 
         byte[] responseHeader = ByteBuffer.allocate(5).order(ByteOrder.BIG_ENDIAN)
             .putInt(correlationId)
@@ -457,7 +507,6 @@ public class Main {
         return buffer.array();
     }
 
-    // Helper to concatenate byte arrays
     private static byte[] concatenateByteArrays(byte[]... arrays) {
         int totalLength = 0;
         for (byte[] array : arrays) {
@@ -591,7 +640,6 @@ public class Main {
                     System.err.println("Error: Calculated negative bodySize (" + header.bodySize + "). Protocol error or parsing issue.");
                     break;
                 }
-
                 if (header.apiKey == 18) {
                     ClientHandler.handleApiVersionsRequest(out, header.correlationId, header.apiVersion, header.bodySize, in);
                 } else if (header.apiKey == 75) {
@@ -653,6 +701,7 @@ public class Main {
         System.err.println("Starting server on port " + port);
         System.err.println("Logs from your program will appear here!");
         try {
+            metadataReader = new ClusterMetadataReader();
             runServer(port);
         } catch (IOException e) {
             System.err.println("IOException: " + e.getMessage());
