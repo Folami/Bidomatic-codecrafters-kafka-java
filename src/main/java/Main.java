@@ -732,36 +732,52 @@ public class Main {
      */
     static class DescribeTopicPartitionsRequest {
         private final int correlationId;
-        private final String topicName;
+        private String topicName;
         private final byte arrayLength;
         private final byte cursor;
 
         public DescribeTopicPartitionsRequest(int correlationId, byte[] body) {
             this.correlationId = correlationId;
 
-            // Parse the request body
+            // Create a ByteBuffer to read the request body
             ByteBuffer buffer = ByteBuffer.wrap(body);
             buffer.order(ByteOrder.BIG_ENDIAN);
 
             // Skip tagged fields
-            buffer.get();
+            if (buffer.hasRemaining()) {
+                buffer.get(); // Skip tagged fields
+            }
 
-            // Read array length
-            this.arrayLength = buffer.get();
+            // Read array length (compact format)
+            this.arrayLength = buffer.hasRemaining() ? buffer.get() : 0;
 
-            // Read topic name length
-            byte topicNameLength = buffer.get();
+            // Initialize topic name
+            this.topicName = "";
 
-            // Read topic name
-            byte[] topicNameBytes = new byte[topicNameLength - 1]; // -1 for compact string format
-            buffer.get(topicNameBytes);
-            this.topicName = new String(topicNameBytes, StandardCharsets.UTF_8);
+            // Read topic name if array length > 1 (meaning there's at least one topic)
+            if (this.arrayLength > 1 && buffer.hasRemaining()) {
+                // Read topic name length (compact format)
+                byte topicNameLength = buffer.get();
 
-            // Skip to cursor
-            buffer.position(buffer.position() + 4); // Skip partition count
+                // Read topic name
+                if (topicNameLength > 1 && buffer.remaining() >= topicNameLength - 1) {
+                    byte[] topicNameBytes = new byte[topicNameLength - 1]; // -1 for compact string format
+                    buffer.get(topicNameBytes);
+                    this.topicName = new String(topicNameBytes, StandardCharsets.UTF_8);
+                }
 
-            // Read cursor
-            this.cursor = buffer.get();
+                // Skip partition IDs array if present
+                if (buffer.remaining() >= 4) {
+                    int partitionCount = buffer.getInt();
+                    // Skip partition IDs if any
+                    for (int i = 0; i < partitionCount && buffer.remaining() >= 4; i++) {
+                        buffer.getInt(); // Skip partition ID
+                    }
+                }
+            }
+
+            // Read cursor if present
+            this.cursor = buffer.hasRemaining() ? buffer.get() : 0;
 
             System.err.println("DescribeTopicPartitionsRequest: topic_name='" + topicName +
                               "', array_length=" + (arrayLength & 0xFF) +
@@ -769,6 +785,8 @@ public class Main {
         }
 
         public byte[] buildResponse() {
+            System.err.println("Building response for topic: '" + topicName + "'");
+
             ByteBuffer bodyBuffer = ByteBuffer.allocate(1024);
             bodyBuffer.order(ByteOrder.BIG_ENDIAN);
 
@@ -784,6 +802,9 @@ public class Main {
             TopicMetadata metadata = metadataReader.getTopicMetadata(topicName);
             boolean isKnown = metadata != null;
             short errorCode = isKnown ? (short) 0 : (short) 3;
+
+            System.err.println("Topic '" + topicName + "' exists: " + isKnown +
+                              (isKnown ? ", UUID: " + metadata.topicId : ""));
 
             bodyBuffer.putShort(errorCode); // error_code
 
@@ -807,6 +828,10 @@ public class Main {
             if (isKnown && !metadata.partitions.isEmpty()) {
                 bodyBuffer.put((byte) 2); // partitions_array_length (1 partition + 1)
                 PartitionMetadata partition = metadata.partitions.get(0);
+
+                System.err.println("Including partition: index=" + partition.partitionIndex +
+                                  ", leader=" + partition.leaderId +
+                                  ", epoch=" + partition.leaderEpoch);
 
                 bodyBuffer.putInt(partition.partitionIndex); // partition_index
                 bodyBuffer.putShort((short) 0); // error_code
@@ -846,7 +871,10 @@ public class Main {
             finalBuffer.putInt(responseBody.length);
             finalBuffer.put(responseBody);
 
-            return finalBuffer.array();
+            byte[] response = finalBuffer.array();
+            System.err.println("Response size: " + response.length + " bytes");
+
+            return response;
         }
     }
 
@@ -863,55 +891,68 @@ public class Main {
         int bytesRead;
 
         while ((bytesRead = in.read(buffer)) != -1) {
-            // Parse the request header
-            ByteBuffer headerBuffer = ByteBuffer.wrap(buffer, 0, bytesRead);
-            headerBuffer.order(ByteOrder.BIG_ENDIAN);
+            try {
+                // Parse the request header
+                ByteBuffer headerBuffer = ByteBuffer.wrap(buffer, 0, bytesRead);
+                headerBuffer.order(ByteOrder.BIG_ENDIAN);
 
-            // Skip message size
-            headerBuffer.getInt(); // Skip message size field
+                // Read message size (for logging only)
+                int messageSize = headerBuffer.getInt();
+                System.err.println("Message size: " + messageSize + " bytes");
 
-            // Read API key
-            short apiKey = headerBuffer.getShort();
+                // Read API key
+                short apiKey = headerBuffer.getShort();
 
-            // Read API version
-            short apiVersion = headerBuffer.getShort();
+                // Read API version
+                short apiVersion = headerBuffer.getShort();
 
-            // Read correlation ID
-            int correlationId = headerBuffer.getInt();
+                // Read correlation ID
+                int correlationId = headerBuffer.getInt();
 
-            System.err.println("Received request: api_key=" + apiKey +
-                              ", api_version=" + apiVersion +
-                              ", correlation_id=" + correlationId);
+                System.err.println("Received request: api_key=" + apiKey +
+                                  ", api_version=" + apiVersion +
+                                  ", correlation_id=" + correlationId);
 
-            // Skip client ID (variable length)
-            short clientIdLength = headerBuffer.getShort();
-            if (clientIdLength > 0) {
-                headerBuffer.position(headerBuffer.position() + clientIdLength);
+                // Skip client ID (variable length)
+                short clientIdLength = headerBuffer.getShort();
+                if (clientIdLength > 0) {
+                    byte[] clientIdBytes = new byte[clientIdLength];
+                    headerBuffer.get(clientIdBytes);
+                    String clientId = new String(clientIdBytes, StandardCharsets.UTF_8);
+                    System.err.println("Client ID: " + clientId);
+                }
+
+                // Skip tagged fields
+                if (headerBuffer.hasRemaining()) {
+                    headerBuffer.get();
+                }
+
+                // Extract request body
+                int bodyStart = headerBuffer.position();
+                int bodyLength = bytesRead - bodyStart;
+                byte[] body = new byte[bodyLength];
+                if (bodyLength > 0) {
+                    System.arraycopy(buffer, bodyStart, body, 0, bodyLength);
+                }
+
+                // Process based on API key
+                byte[] response;
+                if (apiKey == 18) { // ApiVersions
+                    response = new ApiVersionsRequest(apiVersion, correlationId).buildResponse();
+                } else if (apiKey == 75) { // DescribeTopicPartitions
+                    response = new DescribeTopicPartitionsRequest(correlationId, body).buildResponse();
+                } else {
+                    System.err.println("Unknown API key: " + apiKey);
+                    continue;
+                }
+
+                // Send response
+                out.write(response);
+                out.flush();
+            } catch (Exception e) {
+                System.err.println("Error handling request: " + e.getMessage());
+                e.printStackTrace();
             }
-
-            // Skip tagged fields
-            headerBuffer.get();
-
-            // Extract request body
-            int bodyStart = headerBuffer.position();
-            int bodyLength = bytesRead - bodyStart;
-            byte[] body = new byte[bodyLength];
-            System.arraycopy(buffer, bodyStart, body, 0, bodyLength);
-
-            // Process based on API key
-            byte[] response;
-            if (apiKey == 18) { // ApiVersions
-                response = new ApiVersionsRequest(apiVersion, correlationId).buildResponse();
-            } else if (apiKey == 75) { // DescribeTopicPartitions
-                response = new DescribeTopicPartitionsRequest(correlationId, body).buildResponse();
-            } else {
-                System.err.println("Unknown API key: " + apiKey);
-                continue;
-            }
-
-            // Send response
-            out.write(response);
-            out.flush();
         }
     }
 
