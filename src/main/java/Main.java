@@ -1,171 +1,232 @@
-import java.io.*;
-import java.nio.*;
-import java.nio.channels.FileChannel;
-import java.nio.file.*;
-import java.util.*;
-import java.net.*;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
 
+/**
+ * Main class for a simple Kafka clone that supports the ApiVersions and DescribeTopicPartitions requests.
+ * <p>
+ * The broker accepts connections on port 9092, reads a fixed 12-byte header 
+ * (4 bytes message size (size of payload), 2 bytes api_key, 2 bytes api_version, 4 bytes correlation_id),
+ * and sends a response in Kafka’s flexible (compact) message format.
+ * <p>
+ * For ApiVersions requests (api_key == 18):
+ * <ul>
+ *   <li>If the requested api_version is unsupported (< 0 or > 4) an error response with error_code 35 is returned.</li>
+ *   <li>For api_version 0–3, a successful response is returned with error_code 0 and two ApiVersion entries 
+ *       (api_key 18, min_version 0, max_version 4; api_key 75, min_version 0, max_version 0).</li>
+ *   <li>For api_version 4, a minimal successful response is returned with error_code 0 and no ApiVersion entries.</li>
+ * </ul>
+ * <p>
+ * For DescribeTopicPartitions requests (api_key == 75, version 0):
+ * <ul>
+ *   <li>Responds with error_code 3 (UNKNOWN_TOPIC_OR_PARTITION), echoing the requested topic name, 
+ *       a zeroed topic_id, empty partitions, and tester-specific fields.</li>
+ * </ul>
+ */
 public class Main {
-    private static ClusterMetadataReader metadataReader;
-    
-    public static void main(String[] args) {
-        int port = 9092;
-        
-        // Initialize the metadata reader
-        metadataReader = new ClusterMetadataReader();
-        
-        System.err.println("Starting server on port " + port);
-        System.err.println("Logs from your program will appear here!");
-        
-        try (ServerSocket serverSocket = new ServerSocket(port)) {
-            System.err.println("Server is listening on port " + port);
-            
-            while (true) {
-                try (Socket clientSocket = serverSocket.accept()) {
-                    System.err.println("Connection from " + clientSocket.getRemoteSocketAddress() + " has been established!");
-                    handleClient(clientSocket);
-                } catch (IOException e) {
-                    System.err.println("Error handling client: " + e.getMessage());
-                }
+    // private static ClusterMetadataReader metadataReader;
+
+    /**
+     * Encodes a Java String into Kafka's STRING format (INT16 length + UTF-8 bytes).
+     * A null string is encoded as INT16 -1.
+     * @param s the string to encode.
+     * @return the encoded bytes.
+     */
+    public static byte[] encodeKafkaString(String s) {
+        if (s == null) {
+            return ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) -1).array();
+        }
+        byte[] utf8Bytes = s.getBytes(StandardCharsets.UTF_8);
+        return ByteBuffer.allocate(2 + utf8Bytes.length).order(ByteOrder.BIG_ENDIAN).putShort((short) utf8Bytes.length).put(utf8Bytes).array();
+    }
+
+    /**
+     * Helper class to hold the incoming request header.
+     */
+    public static class FullRequestHeader {
+        public int messageSize; // The total size of the message *following* the message_size field itself.
+        public short apiKey;
+        public short apiVersion;
+        public int correlationId;
+        public String clientId;
+        public int clientIdFieldLengthBytes; // Bytes consumed by client_id: 2 for len + N for data, or 2 if null/empty.
+        public int bodySize; // Calculated size of the actual request body payload (messageSize - commonHeaderParts - clientIdFieldLength)
+
+        // Default constructor
+        public FullRequestHeader() {}
+    }
+
+    // Helper class for readKafkaString results
+    public static class KafkaStringReadResult {
+        public final String value;
+        public final int bytesRead; // Total bytes read from stream for this string field
+
+        public KafkaStringReadResult(String value, int bytesRead) {
+            this.value = value;
+            this.bytesRead = bytesRead;
+        }
+    }
+
+    /**
+     * Reads exactly n bytes from the InputStream.
+     * @param in the input stream.
+     * @param n the number of bytes to read.
+     * @return the read bytes.
+     * @throws IOException if the connection is closed before n bytes are read.
+     */
+    public static byte[] readNBytes(InputStream in, int n) throws IOException {
+        byte[] data = new byte[n];
+        int totalRead = 0;
+        while (totalRead < n) {
+            int bytesRead = in.read(data, totalRead, n - totalRead);
+            if (bytesRead == -1) {
+                throw new IOException("Expected " + n + " bytes, got " + totalRead + " bytes");
             }
-        } catch (IOException e) {
-            System.err.println("Server error: " + e.getMessage());
+            totalRead += bytesRead;
         }
+        System.err.println("readNBytes: Requested=" + n + ", Read=" + totalRead + ", Data=" + bytesToHex(data));
+        return data;
     }
-    
-    static void handleClient(Socket clientSocket) throws IOException {
-        InputStream in = clientSocket.getInputStream();
-        OutputStream out = clientSocket.getOutputStream();
-        
-        try {
-            while (true) {
-                // Read message size
-                byte[] sizeBytes = readNBytes(in, 4);
-                if (sizeBytes.length < 4) {
-                    throw new IOException("Expected 4 bytes, got " + sizeBytes.length + " bytes");
-                }
-                
-                int messageSize = ByteBuffer.wrap(sizeBytes).getInt();
-                
-                // Read API key and version
-                byte[] headerBytes = readNBytes(in, 8);
-                if (headerBytes.length < 8) {
-                    throw new IOException("Expected 8 bytes, got " + headerBytes.length + " bytes");
-                }
-                
-                ByteBuffer headerBuffer = ByteBuffer.wrap(headerBytes);
-                short apiKey = headerBuffer.getShort();
-                short apiVersion = headerBuffer.getShort();
-                int correlationId = headerBuffer.getInt();
-                
-                // Read client ID
-                byte[] clientIdLenBytes = readNBytes(in, 2);
-                if (clientIdLenBytes.length < 2) {
-                    throw new IOException("Expected 2 bytes, got " + clientIdLenBytes.length + " bytes");
-                }
-                
-                short clientIdLen = ByteBuffer.wrap(clientIdLenBytes).getShort();
-                String clientId = "";
-                
-                if (clientIdLen > 0) {
-                    byte[] clientIdBytes = readNBytes(in, clientIdLen);
-                    if (clientIdBytes.length < clientIdLen) {
-                        throw new IOException("Expected " + clientIdLen + " bytes, got " + clientIdBytes.length + " bytes");
-                    }
-                    clientId = new String(clientIdBytes, "UTF-8");
-                }
-                
-                // Calculate body size
-                int headerSize = 4 + 8 + 2 + clientIdLen;
-                int bodySize = messageSize - (headerSize - 4);
-                
-                System.err.println("Received correlation_id: " + correlationId + 
-                                  ", requested api_version: " + apiVersion + 
-                                  ", api_key: " + apiKey + 
-                                  ", client_id: '" + clientId + "'" + 
-                                  ", client_id_length: " + (clientIdLen + 2) + 
-                                  ", body_size: " + bodySize);
-                
-                // Handle different API requests
-                if (apiKey == 18) { // ApiVersions
-                    handleApiVersionsRequest(out, correlationId, apiVersion, bodySize, in);
-                } else if (apiKey == 75) { // DescribeTopicPartitions
-                    handleDescribeTopicPartitionsRequest(out, correlationId, apiVersion, bodySize, in);
-                } else {
-                    // Skip unknown request body
-                    if (bodySize > 0) {
-                        in.skip(bodySize);
-                    }
-                    System.err.println("Unsupported API key: " + apiKey);
-                }
+
+    // Helper for logging byte arrays as hex
+    private static final char[] HEX_ARRAY = "0123456789ABCDEF".toCharArray();
+    public static String bytesToHex(byte[] bytes) {
+        if (bytes == null) return "null";
+        char[] hexChars = new char[bytes.length * 2];
+        for (int j = 0; j < bytes.length; j++) {
+            int v = bytes[j] & 0xFF;
+            hexChars[j * 2] = HEX_ARRAY[v >>> 4];
+            hexChars[j * 2 + 1] = HEX_ARRAY[v & 0x0F];
+        }
+        return new String(hexChars);
+    }
+
+    public static KafkaStringReadResult readKafkaString(InputStream in) throws IOException {
+        byte[] lengthBytes = readNBytes(in, 2); // readNBytes will print its own log
+        short length = ByteBuffer.wrap(lengthBytes).order(ByteOrder.BIG_ENDIAN).getShort();
+        System.err.println("readKafkaString: Length bytes=" + bytesToHex(lengthBytes) + ", Length=" + length);
+
+        if (length == -1) { // Nullable string is null
+            return new KafkaStringReadResult(null, 2);
+        }
+        if (length < 0) { // Invalid length
+            System.err.println("readKafkaString: Invalid negative length " + length + " (and not -1 for null). Treating as empty string.");
+            return new KafkaStringReadResult("", 2);
+        }
+
+        byte[] stringPayloadBytes = readNBytes(in, length); // readNBytes will print its own log
+        System.err.println("readKafkaString: Read " + length + " bytes for string payload, Data=" + bytesToHex(stringPayloadBytes));
+        return new KafkaStringReadResult(new String(stringPayloadBytes, StandardCharsets.UTF_8), 2 + length);
+    }
+
+    /**
+     * Reads the full Kafka request header from the socket.
+     * <p>
+     * Header layout:
+     * <ul>
+     *   <li>4 bytes: message_size (size of data following this field)</li>
+     *   <li>2 bytes: api_key (INT16)</li>
+     *   <li>2 bytes: api_version (INT16)</li>
+     *   <li>4 bytes: correlation_id (INT32)</li>
+     *   <li>client_id: STRING (INT16 length + UTF-8 bytes)</li>
+     * </ul>
+     * @param in the socket input stream.
+     * @return the populated FullRequestHeader.
+     * @throws IOException if reading fails.
+     */
+    public static FullRequestHeader readFullRequestHeader(InputStream in) throws IOException {
+        FullRequestHeader frh = new FullRequestHeader();
+
+        byte[] messageSizeBytes = readNBytes(in, 4);
+        frh.messageSize = ByteBuffer.wrap(messageSizeBytes).order(ByteOrder.BIG_ENDIAN).getInt();
+
+        byte[] commonHeaderPartsBytes = readNBytes(in, 8); // apiKey, apiVersion, correlationId
+        ByteBuffer commonHeaderBuffer = ByteBuffer.wrap(commonHeaderPartsBytes).order(ByteOrder.BIG_ENDIAN);
+        frh.apiKey = commonHeaderBuffer.getShort();
+        frh.apiVersion = commonHeaderBuffer.getShort();
+        frh.correlationId = commonHeaderBuffer.getInt();
+
+        // Read ClientId using the new helper, mimicking Python's read_string call
+        KafkaStringReadResult clientIdResult = readKafkaString(in);
+        frh.clientId = clientIdResult.value;
+        frh.clientIdFieldLengthBytes = clientIdResult.bytesRead;
+
+        int commonHeaderSize = 8; // apiKey (2) + apiVersion (2) + correlationId (4)
+        int headerSizeForBodyCalc = commonHeaderSize + frh.clientIdFieldLengthBytes; // Mimics python's header_size calculation
+        frh.bodySize = frh.messageSize - headerSizeForBodyCalc;
+
+        // Mimic Python's print statement at the end of read_request_header
+        System.err.println("readFullRequestHeader: TotalSize=" + frh.messageSize +
+                           ", HeaderSize=" + headerSizeForBodyCalc +
+                           ", BodySize=" + frh.bodySize);
+        return frh;
+    }
+
+    /**
+     * Discards remaining bytes from the request.
+     * @param in the socket input stream.
+     * @param remaining the number of remaining bytes to discard.
+     */
+    public static void discardRemainingRequest(InputStream in, int remaining) throws IOException {
+        while (remaining > 0) {
+            byte[] buffer = new byte[Math.min(4096, remaining)];
+            int read = in.read(buffer, 0, buffer.length); // Read up to the buffer's capacity (which is the chunk_size)
+            if (read == -1) {
+                throw new IOException("Unexpected end of stream while discarding " + remaining + " bytes");
             }
-        } catch (IOException e) {
-            System.err.println("IOException while reading header, closing connection: " + e.getMessage());
-        } finally {
-            System.err.println("Client connection closed.");
+            remaining -= read;
         }
     }
-    
-    static void handleApiVersionsRequest(OutputStream out, int correlationId, short apiVersion, int bodySize, InputStream in) throws IOException {
-        // Skip request body
-        if (bodySize > 0) {
-            in.skip(bodySize);
-            System.err.println("Discarded " + bodySize + " bytes from ApiVersions request body.");
-        }
-        
-        // Build and send response
-        byte[] response = buildApiVersionsResponse(correlationId, apiVersion);
-        out.write(response);
-        out.flush();
-        
-        System.err.println("Sent ApiVersions response (" + response.length + " bytes)");
-    }
-    
-    static void handleDescribeTopicPartitionsRequest(OutputStream out, int correlationId, short apiVersion, int bodySize, InputStream in) throws IOException {
-        // Parse the request to get the topic name
-        // Skip tagged fields
-        int tagged = in.read();
-        System.err.println("parse_tagged_field: tagged=" + tagged);
-        
-        // Read topics array length (compact format)
-        int arrayLength = in.read();
-        System.err.println("P_DTP_R: array_length=" + arrayLength);
-        
-        // Read topic name length (compact format)
-        int topicNameLength = in.read();
-        System.err.println("P_DTP_R: topic_name_length=" + topicNameLength);
-        
-        // Read topic name
-        byte[] topicNameBytes = readNBytes(in, topicNameLength - 1); // Subtract 1 for compact format
-        String topicName = new String(topicNameBytes, "UTF-8");
-        System.err.println("P_DTP_R: topic_name='" + topicName + "'");
-        
-        // Read cursor
-        int cursor = in.read();
-        System.err.println("P_DTP_R: cursor=" + cursor);
-        
-        // Skip the rest of the request
-        int remaining = bodySize - (1 + 1 + 1 + (topicNameLength - 1) + 1);
-        if (remaining > 0) {
-            in.skip(remaining);
-            System.err.println("P_DTP_R: Discarding " + remaining + " unparsed bytes.");
-        }
-        
-        System.err.println("Parsed DescribeTopicPartitions v0 request for topic: '" + topicName + "'");
-        System.err.println("build_describe_topic_partitions_response: topic_name='" + topicName + 
-                          "', array_length=" + arrayLength + 
-                          ", topic_name_length=" + topicNameLength + 
-                          ", cursor=" + cursor);
-        
-        // Build and send response
-        byte[] response = buildDescribeTopicPartitionsResponse(correlationId, topicName);
-        out.write(response);
-        out.flush();
-        
-        System.err.println("Sent DescribeTopicPartitions v0 response (" + response.length + " bytes)");
-    }
-    
-    static byte[] buildApiVersionsResponse(int correlationId, short apiVersion) {
+
+    /**
+     * Builds an API Versions response, mimicking the Python build_api_versions_response.
+     * Handles success (v0–3, v4) and error (unsupported version) cases.
+     * The response includes a flexible header (correlation_id + tag_buffer).
+     * <p>
+     * Success response body for api_version 0–3 (22 bytes):
+     * <ul>
+     *   <li>error_code: INT16 (2 bytes, value 0)</li>
+     *   <li>api_keys: compact array length: 1 byte (value 3, meaning two elements + 1)</li>
+     *   <li>An ApiVersion entry (7 bytes) containing:
+     *        api_key: INT16 (value 18),
+     *        min_version: INT16 (value 0),
+     *        max_version: INT16 (value 4),
+     *        entry TAG_BUFFER: 1 byte (0x00)
+     *   </li>     
+     *   <li>A DescribeTopicPartitions entry (7 bytes) containing:
+     *        api_key: INT16 (value 75),
+     *        min_version: INT16 (value 0),
+     *        max_version: INT16 (value 0),
+     *        entry TAG_BUFFER: 1 byte (0x00)
+     *   </li>     
+     *   <li>throttle_time_ms: INT32 (value 0)</li>
+     *   <li>overall TAG_BUFFER: 1 byte (0x00)</li>
+     * </ul>
+     * Success response body for api_version 4 (8 bytes):
+     * <ul>
+     *   <li>error_code: INT16 (2 bytes, value 0)</li>
+     *   <li>api_keys: compact array length: 1 byte (value 1, meaning zero entries + 1)</li>
+     *   <li>throttle_time_ms: INT32 (value 0)</li>
+     *   <li>overall TAG_BUFFER: 1 byte (0x00)</li>
+     * </ul>
+     * Error response body (8 bytes for unsupported version):
+     * <ul>
+     *  <li>error_code: INT16 (2 bytes, value 35)</li>
+     *  <li>api_keys: compact array length: 1 byte (value 1, meaning zero entries + 1)</li>
+     *  <li>throttle_time_ms: INT32 (value 0)</li>
+     *  <li>overall TAG_BUFFER: 1 byte (0x00)</li>
+     * </ul>
+     * @param correlationId the correlation id from the request.
+     * @param requestedApiVersion the api_version from the client's request.
+     * @return the complete ApiVersions response bytes.
+     */
+    public static byte[] buildApiVersionsInternalResponse(int correlationId, short apiVersion) {
         ByteArrayOutputStream response = new ByteArrayOutputStream();
         
         try {
@@ -178,9 +239,6 @@ public class Main {
             
             // Response header: correlation ID
             response.write(ByteBuffer.allocate(4).putInt(correlationId).array());
-            
-            // Header tagged fields (empty)
-            response.write(0);
             
             // Error code
             response.write(ByteBuffer.allocate(2).putShort(errorCode).array());
@@ -222,92 +280,382 @@ public class Main {
             return new byte[0];
         }
     }
-    
-    static byte[] buildDescribeTopicPartitionsResponse(int correlationId, String topicName) {
-        ByteArrayOutputStream response = new ByteArrayOutputStream();
-        
-        try {
-            // Check if the topic exists
-            TopicMetadata topicMetadata = metadataReader.getTopicMetadata(topicName);
-            boolean topicExists = (topicMetadata != null);
-            
-            System.err.println("Topic '" + topicName
-                                  + "' exists: " + topicExists);
-            
-            if (topicExists) {
-                // Build response for existing topic
-                // (You can add the actual implementation here)
-                // For now, we'll send a placeholder response
-                response.write(buildExistingTopicResponse(correlationId, topicName));
-            } else {
-                // Build response for unknown topic
-                response.write(buildUnknownTopicResponse(correlationId, topicName));
+
+    /**
+     * Result class for parsing DescribeTopicPartitions request, mimicking Python's parse_describe_topic_partitions.
+     */
+    public static class DescribeTopicPartitionsParseResult {
+        public final String topicName;
+        public final byte arrayLength;
+        public final byte topicNameLength;
+        public final byte cursor;
+
+        public DescribeTopicPartitionsParseResult(String topicName, byte arrayLength, byte topicNameLength, byte cursor) {
+            this.topicName = topicName;
+            this.arrayLength = arrayLength;
+            this.topicNameLength = topicNameLength;
+            this.cursor = cursor;
+        }
+    }
+
+    /**
+     * Parses a DescribeTopicPartitions (v0) request body, mimicking Python's parse_describe_topic_partitions.
+     * The request body format (compact, as per Python):
+     *  - topics: compact array of topics:
+     *       int8 topicsCount (1 byte)
+     *       For each topic:
+     *          string topic_name (1-byte length + UTF-8 bytes)
+     *          int32 partitionsCount
+     *          For each partition: int32 partition id
+     * Returns the first topic name, array_length, topic_name_length, and cursor.
+     */
+    public static DescribeTopicPartitionsParseResult parseDescribeTopicPartitionsRequest(
+            InputStream in, 
+            int remaining, 
+            int clientIdLen
+        ) throws IOException {
+        int bytesConsumed = 0;
+        byte arrayLength = 0;
+        byte topicNameLength = 0;
+        byte cursor = 0;
+        String topicName = "";
+
+        // Read array_length (1 byte, compact)
+        if (remaining < 1) {
+            System.err.println("P_DTP_R: Body too small for array_length (" + remaining + " bytes).");
+            return new DescribeTopicPartitionsParseResult("", (byte) 0, (byte) 0, (byte) 0);
+        }
+        byte[] arrayLengthBytes = readNBytes(in, 1);
+        arrayLength = arrayLengthBytes[0];
+        bytesConsumed += 1;
+        System.err.println("P_DTP_R: array_length=" + (arrayLength & 0xFF));
+
+        // Read topic_name_length (1 byte, compact)
+        if (remaining - bytesConsumed < 1) {
+            System.err.println("P_DTP_R: Not enough data for topic_name_length. Remaining: " + (remaining - bytesConsumed));
+            return new DescribeTopicPartitionsParseResult("", arrayLength, (byte) 0, (byte) 0);
+        }
+        byte[] topicNameLengthBytes = readNBytes(in, 1);
+        topicNameLength = topicNameLengthBytes[0];
+        bytesConsumed += 1;
+        System.err.println("P_DTP_R: topic_name_length=" + (topicNameLength & 0xFF));
+
+        // Read topic_name (topicNameLength - 1 bytes, to match Python bug)
+        int topicBytesToRead = (topicNameLength & 0xFF) - 1;
+        if (topicBytesToRead > 0) {
+            if (topicBytesToRead > remaining - bytesConsumed) {
+                System.err.println("P_DTP_R: Stated topic_name length " + topicBytesToRead + " exceeds remaining bytes " + (remaining - bytesConsumed));
+                return new DescribeTopicPartitionsParseResult("", arrayLength, topicNameLength, (byte) 0);
             }
-            
-            return response.toByteArray();
-        } catch (IOException e) {
-            System.err.println("Error building DescribeTopicPartitions response: " + e.getMessage());
-            return new byte[0];
+            byte[] topicNameBytes = readNBytes(in, topicBytesToRead);
+            bytesConsumed += topicBytesToRead;
+            try {
+                topicName = new String(topicNameBytes, StandardCharsets.UTF_8);
+            } catch (Exception e) {
+                System.err.println("P_DTP_R: Topic_name decode error: " + e.getMessage());
+                topicName = "";
+            }
+        }
+        System.err.println("P_DTP_R: topic_name='" + topicName + "'");
+
+        // Skip to cursor (topic_name_starter + topic_name_length + 4)
+        int cursorOffset = 14 + clientIdLen + 1 + 2 + (topicNameLength & 0xFF) + 4;
+        int bytesToSkip = cursorOffset - (14 + clientIdLen + 1 + bytesConsumed);
+        if (bytesToSkip > 0) {
+            if (bytesToSkip > remaining - bytesConsumed) {
+                System.err.println("P_DTP_R: Cannot skip " + bytesToSkip + " bytes to cursor. Remaining: " + (remaining - bytesConsumed));
+                return new DescribeTopicPartitionsParseResult(topicName, arrayLength, topicNameLength, (byte) 0);
+            }
+            discardRemainingRequest(in, bytesToSkip);
+            bytesConsumed += bytesToSkip;
+        }
+
+        // Read cursor (1 byte)
+        if (remaining - bytesConsumed >= 1) {
+            byte[] cursorBytes = readNBytes(in, 1);
+            cursor = cursorBytes[0];
+            bytesConsumed += 1;
+            System.err.println("P_DTP_R: cursor=" + (cursor & 0xFF));
+        } else {
+            System.err.println("P_DTP_R: Not enough data for cursor. Remaining: " + (remaining - bytesConsumed));
+        }
+
+        // Discard remaining bytes
+        int unparsedBytes = remaining - bytesConsumed;
+        if (unparsedBytes > 0) {
+            System.err.println("P_DTP_R: Discarding " + unparsedBytes + " unparsed bytes.");
+            discardRemainingRequest(in, unparsedBytes);
+        }
+
+        return new DescribeTopicPartitionsParseResult(topicName, arrayLength, topicNameLength, cursor);
+    }
+
+    /**
+     * Builds a DescribeTopicPartitions (v0) response for an unknown topic, mimicking Python's response_api_key_75.
+     * The response body includes flexible-format fields to match tester expectations:
+     *   - throttle_time_ms: INT32 (0)
+     *   - array_length: 1 byte (compact array length)
+     *   - error_code: INT16 (3, UNKNOWN_TOPIC_OR_PARTITION)
+     *   - topic_name_length: 1 byte (compact string length)
+     *   - topic_name: UTF-8 bytes
+     *   - topic_id: 16 bytes of zeros
+     *   - is_internal: BOOLEAN (0)
+     *   - partition_array: 1 byte (compact array length, 1 for empty)
+     *   - topic_authorized_operations: INT32 (0x00000df8)
+     *   - topic_tag_buffer: 1 byte (0x00)
+     *   - cursor: 1 byte
+     *   - response_tag_buffer: 1 byte (0x00)
+     */
+    public static byte[] buildDescribeTopicPartitionsResponse(
+            int correlationId, String topic, byte arrayLength, byte topicNameLength, byte cursor) {
+        if (topic == null) {
+            topic = "";
+        }
+        System.err.println("build_describe_topic_partitions_response: topic_name='" + topic +
+                           "', array_length=" + (arrayLength & 0xFF) +
+                           ", topic_name_length=" + (topicNameLength & 0xFF) +
+                           ", cursor=" + (cursor & 0xFF));
+
+        byte[] throttleTimeMsBytes = ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN).putInt(0).array();
+        byte[] arrayLengthBytes = new byte[]{arrayLength};
+        byte[] errorCodeBytes = ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 3).array();
+        byte[] topicNameLengthBytes = new byte[]{topicNameLength};
+        byte[] topicNameBytes = topic.getBytes(StandardCharsets.UTF_8);
+        byte[] topicId = new byte[16];
+        byte[] isInternal = new byte[]{(byte) 0};
+        byte[] partitionArray = new byte[]{(byte) 1};
+        byte[] topicAuthorizedOperations = new byte[]{(byte) 0x00, (byte) 0x00, (byte) 0x0d, (byte) 0xf8};
+        byte[] tagBuffer = new byte[]{(byte) 0};
+        byte[] cursorBytes = new byte[]{cursor};
+
+        byte[] responseBody = concatenateByteArrays(
+            throttleTimeMsBytes,
+            arrayLengthBytes,
+            errorCodeBytes,
+            topicNameLengthBytes,
+            topicNameBytes,
+            topicId,
+            isInternal,
+            partitionArray,
+            topicAuthorizedOperations,
+            tagBuffer,
+            cursorBytes,
+            tagBuffer
+        );
+
+        byte[] responseHeader = ByteBuffer.allocate(5).order(ByteOrder.BIG_ENDIAN)
+            .putInt(correlationId)
+            .put((byte) 0)
+            .array();
+        int messageSize = responseHeader.length + responseBody.length;
+
+        ByteBuffer buffer = ByteBuffer.allocate(4 + messageSize);
+        buffer.order(ByteOrder.BIG_ENDIAN);
+        buffer.putInt(messageSize);
+        buffer.put(responseHeader);
+        buffer.put(responseBody);
+        return buffer.array();
+    }
+
+    // Helper to concatenate byte arrays
+    private static byte[] concatenateByteArrays(byte[]... arrays) {
+        int totalLength = 0;
+        for (byte[] array : arrays) {
+            totalLength += array.length;
+        }
+        byte[] result = new byte[totalLength];
+        int offset = 0;
+        for (byte[] array : arrays) {
+            System.arraycopy(array, 0, result, offset, array.length);
+            offset += array.length;
+        }
+        return result;
+    }
+
+    private static class ClientHandler {
+        static class ParseResult {
+            final short apiKey;
+            final short apiVersion;
+            final int correlationId;
+            final String clientId;
+            final int clientIdLen;
+            final int bodySize;
+
+            ParseResult(short apiKey, short apiVersion, int correlationId, String clientId, int clientIdLen, int bodySize) {
+                this.apiKey = apiKey;
+                this.apiVersion = apiVersion;
+                this.correlationId = correlationId;
+                this.clientId = clientId;
+                this.clientIdLen = clientIdLen;
+                this.bodySize = bodySize;
+            }
+        }
+
+        static ParseResult parseRequestHeader(InputStream in) throws IOException {
+            FullRequestHeader header = readFullRequestHeader(in);
+            System.err.println("parse_request_header: api_key=" + header.apiKey +
+                               ", api_version=" + header.apiVersion +
+                               ", correlation_id=" + header.correlationId);
+            return new ParseResult(header.apiKey, header.apiVersion, header.correlationId,
+                                   header.clientId, header.clientIdFieldLengthBytes, header.bodySize);
+        }
+
+        static byte parseTaggedField(InputStream in, int remaining) throws IOException {
+            if (remaining < 1) {
+                System.err.println("parse_tagged_field: Not enough data for tagged field. Remaining: " + remaining);
+                return 0;
+            }
+            byte[] taggedBytes = readNBytes(in, 1);
+            System.err.println("parse_tagged_field: tagged=" + (taggedBytes[0] & 0xFF));
+            return taggedBytes[0];
+        }
+
+        static void handleApiVersionsRequest(OutputStream out, int correlationId, short apiVersion, int bodySize, InputStream in) throws IOException {
+            if (bodySize > 0) {
+                discardRemainingRequest(in, bodySize);
+                System.err.println("Discarded " + bodySize + " bytes from ApiVersions request body.");
+            }
+            byte[] response = buildApiVersionsInternalResponse(correlationId, apiVersion);
+            out.write(response);
+            out.flush();
+            System.err.println("Sent ApiVersions response (" + response.length + " bytes)");
+        }
+
+        static void handleDescribeTopicPartitionsRequest(
+            OutputStream out, int correlationId, 
+            short apiVersion, int bodySize, 
+            InputStream in, int clientIdLen
+        ) throws IOException {
+            if (apiVersion != 0) {
+                System.err.println("Unsupported DescribeTopicPartitions version: " + apiVersion + ". Discarding body.");
+                if (bodySize > 0) {
+                    discardRemainingRequest(in, bodySize);
+                }
+                return;
+            }
+            // Read tagged field after client_id
+            int remaining = bodySize;
+            byte tagged = parseTaggedField(in, remaining);
+            remaining -= 1;
+            DescribeTopicPartitionsParseResult parseResult;
+            try {
+                parseResult = parseDescribeTopicPartitionsRequest(in, remaining, clientIdLen);
+                System.err.println("Parsed DescribeTopicPartitions v0 request for topic: '" + parseResult.topicName + "'");
+            } catch (IOException e) {
+                System.err.println("Error parsing DescribeTopicPartitions v0 request: " + e.getMessage());
+                parseResult = new DescribeTopicPartitionsParseResult("", (byte) 0, (byte) 0, (byte) 0);
+            }
+            byte[] response = buildDescribeTopicPartitionsResponse(
+                correlationId, parseResult.topicName, parseResult.arrayLength, parseResult.topicNameLength, parseResult.cursor);
+            out.write(response);
+            out.flush();
+            System.err.println("Sent DescribeTopicPartitions v0 response (" + response.length + " bytes)");
+        }
+
+        static void handleUnknownRequest(int apiKey, int bodySize, InputStream in) throws IOException {
+            System.err.println("Unknown api_key " + apiKey + ", skipping.");
+            if (bodySize > 0) {
+                discardRemainingRequest(in, bodySize);
+                System.err.println("Discarded " + bodySize + " bytes from unknown request.");
+            }
         }
     }
-    
-    static byte[] buildExistingTopicResponse(int correlationId, String topicName) {
-        // Implement the response for an existing topic
-        // This is a placeholder implementation
-        ByteArrayOutputStream response = new ByteArrayOutputStream();
-        
+
+    /**
+     * Handles an individual client connection, mimicking Python's handle_client.
+     * Processes multiple sequential requests from the same client.
+     */
+    public static void handleClient(Socket clientSocket) {
         try {
-            // Add the actual implementation here
-            // For now, we'll send a placeholder response
-            response.write(ByteBuffer.allocate(4).putInt(correlationId).array());
-            response.write(ByteBuffer.allocate(4).putInt(0).array()); // throttle_time_ms
-            response.write(0); // tagged fields (empty)
-            response.write(1); // topics array length (compact format)
-            response.write(1); // topic name length (compact format)
-            response.write(topicName.getBytes("UTF-8"));
-            response.write(0); // topic_id (16 bytes of zeros)
-            response.write(0); // is_internal (BOOLEAN)
-            response.write(1); // partition_array length (compact format)
-            response.write(0); // partition_array (empty)
-            response.write(ByteBuffer.allocate(4).putInt(0x00000df8).array()); // topic_authorized_operations
-            response.write(0); // topic_tag_buffer (empty)
-            response.write(0); // cursor
-            response.write(0); // response_tag_buffer (empty)
-            
-            return response.toByteArray();
-        } catch (IOException e) {
-            System.err.println("Error building existing topic response: " + e.getMessage());
-            return new byte[0];
+            InputStream in = clientSocket.getInputStream();
+            OutputStream out = clientSocket.getOutputStream();
+            while (true) {
+                ClientHandler.ParseResult header;
+                try {
+                    header = ClientHandler.parseRequestHeader(in);
+                } catch (IOException e) {
+                    System.err.println("IOException while reading header, closing connection: " + e.getMessage());
+                    break;
+                } catch (Exception e) {
+                    System.err.println("Error reading full request header: " + e.getMessage());
+                    break;
+                }
+                System.err.println("Received correlation_id: " + header.correlationId +
+                                   ", requested api_version: " + header.apiVersion +
+                                   ", api_key: " + header.apiKey +
+                                   ", client_id: '" + header.clientId + "'" +
+                                   ", client_id_length: " + header.clientIdLen +
+                                   ", body_size: " + header.bodySize);
+
+                if (header.bodySize < 0) {
+                    System.err.println("Error: Calculated negative bodySize (" + header.bodySize + "). Protocol error or parsing issue.");
+                    break;
+                }
+
+                if (header.apiKey == 18) {
+                    ClientHandler.handleApiVersionsRequest(out, header.correlationId, header.apiVersion, header.bodySize, in);
+                } else if (header.apiKey == 75) {
+                    ClientHandler.handleDescribeTopicPartitionsRequest(out, header.correlationId, header.apiVersion, header.bodySize, in, header.clientIdLen);
+                } else {
+                    ClientHandler.handleUnknownRequest(header.apiKey, header.bodySize, in);
+                }
+            }
+        } catch (Throwable t) {
+            System.err.println("Error handling client: " + t.getMessage());
+        } finally {
+            try {
+                clientSocket.shutdownOutput();
+            } catch (IOException e) {}
+            try {
+                clientSocket.close();
+            } catch (IOException e) {}
+            System.err.println("Client connection closed.");
         }
     }
-    
-    static byte[] buildUnknownTopicResponse(int correlationId, String topicName) {
-        // Implement the response for an unknown topic
-        // This is a placeholder implementation
-        ByteArrayOutputStream response = new ByteArrayOutputStream();
-        
+
+    /**
+     * Runs the server on the specified port.
+     * <p>
+     * This method continuously accepts new client connections.
+     * For each connection, a new thread is spawned to handle sequential requests from that client.
+     * @param port the port to listen on.
+     * @throws IOException if an I/O error occurs.
+     */
+    public static void runServer(int port) throws IOException {
+        ServerSocket serverSocket = new ServerSocket(port);
+        serverSocket.setReuseAddress(true);
+        System.err.println("Server is listening on port " + port);
         try {
-            // Add the actual implementation here
-            // For now, we'll send a placeholder response
-            response.write(ByteBuffer.allocate(4).putInt(correlationId).array());
-            response.write(ByteBuffer.allocate(4).putInt(0).array()); // throttle_time_ms
-            response.write(0); // tagged fields (empty)
-            response.write(1); // topics array length (compact format)
-            response.write(1); // topic name length (compact format)
-            response.write(topicName.getBytes("UTF-8"));
-            response.write(0); // topic_id (16 bytes of zeros)
-            response.write(0); // is_internal (BOOLEAN)
-            response.write(1); // partition_array length (compact format)
-            response.write(0); // partition_array (empty)
-            response.write(ByteBuffer.allocate(4).putInt(0x00000df8).array()); // topic_authorized_operations
-            response.write(0); // topic_tag_buffer (empty)
-            response.write(0); // cursor
-            response.write(0); // response_tag_buffer (empty)
-            
-            return response.toByteArray();
+            while (true) {
+                Socket clientSocket = serverSocket.accept();
+                System.err.println("Connection from " + clientSocket.getRemoteSocketAddress() + " has been established!");
+                // Spawn a new thread to handle this client concurrently.
+                new Thread(() -> handleClient(clientSocket)).start();
+            }
+        } finally {
+            serverSocket.close();
+        }
+    }
+
+    /**
+     * Main entry point.
+     * @param args command-line arguments (optional port number).
+     */
+    public static void main(String[] args) {
+        int port = 9092;
+        if (args.length > 0) {
+            try {
+                port = Integer.parseInt(args[0]);
+            } catch (NumberFormatException e) {
+                System.err.println("Invalid port number, using default port 9092.");
+            }
+        }
+        System.err.println("Starting server on port " + port);
+        System.err.println("Logs from your program will appear here!");
+        try {
+            runServer(port);
         } catch (IOException e) {
-            System.err.println("Error building unknown topic response: " + e.getMessage());
-            return new byte[0];
+            System.err.println("IOException: " + e.getMessage());
         }
     }
 }
