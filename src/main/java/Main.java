@@ -733,51 +733,93 @@ public class Main {
     static class DescribeTopicPartitionsRequest {
         private final int correlationId;
         private String topicName;
-        private final byte arrayLength;
-        private final byte cursor;
+        private byte arrayLength;
+        private byte cursor;
 
         public DescribeTopicPartitionsRequest(int correlationId, byte[] body) {
             this.correlationId = correlationId;
 
-            // Create a ByteBuffer to read the request body
-            ByteBuffer buffer = ByteBuffer.wrap(body);
-            buffer.order(ByteOrder.BIG_ENDIAN);
-
-            // Skip tagged fields
-            if (buffer.hasRemaining()) {
-                buffer.get(); // Skip tagged fields
-            }
-
-            // Read array length (compact format)
-            this.arrayLength = buffer.hasRemaining() ? buffer.get() : 0;
-
-            // Initialize topic name
+            // Initialize default values
             this.topicName = "";
+            this.arrayLength = 0;
+            this.cursor = 0;
 
-            // Read topic name if array length > 1 (meaning there's at least one topic)
-            if (this.arrayLength > 1 && buffer.hasRemaining()) {
-                // Read topic name length (compact format)
-                byte topicNameLength = buffer.get();
+            try {
+                // Dump the request body for debugging
+                StringBuilder hexDump = new StringBuilder("Request body: ");
+                for (byte b : body) {
+                    hexDump.append(String.format("%02X ", b & 0xFF));
+                }
+                System.err.println(hexDump.toString());
 
-                // Read topic name
-                if (topicNameLength > 1 && buffer.remaining() >= topicNameLength - 1) {
-                    byte[] topicNameBytes = new byte[topicNameLength - 1]; // -1 for compact string format
-                    buffer.get(topicNameBytes);
-                    this.topicName = new String(topicNameBytes, StandardCharsets.UTF_8);
+                // Create a ByteBuffer to read the request body
+                ByteBuffer buffer = ByteBuffer.wrap(body);
+                buffer.order(ByteOrder.BIG_ENDIAN);
+
+                // Skip tagged fields
+                if (buffer.hasRemaining()) {
+                    byte taggedField = buffer.get(); // Skip tagged fields
+                    System.err.println("Tagged field: " + taggedField);
                 }
 
-                // Skip partition IDs array if present
-                if (buffer.remaining() >= 4) {
-                    int partitionCount = buffer.getInt();
-                    // Skip partition IDs if any
-                    for (int i = 0; i < partitionCount && buffer.remaining() >= 4; i++) {
-                        buffer.getInt(); // Skip partition ID
+                // Read array length (compact format)
+                if (buffer.hasRemaining()) {
+                    this.arrayLength = buffer.get();
+                    System.err.println("Array length: " + (arrayLength & 0xFF));
+
+                    // Read topic name if array length > 1 (meaning there's at least one topic)
+                    if (this.arrayLength > 1 && buffer.hasRemaining()) {
+                        // Read topic name length (compact format)
+                        byte topicNameLength = buffer.get();
+                        System.err.println("Topic name length: " + (topicNameLength & 0xFF));
+
+                        // Read topic name
+                        if (topicNameLength > 0 && buffer.remaining() >= topicNameLength - 1) {
+                            byte[] topicNameBytes = new byte[topicNameLength - 1]; // -1 for compact string format
+                            buffer.get(topicNameBytes);
+                            this.topicName = new String(topicNameBytes, StandardCharsets.UTF_8);
+                            System.err.println("Topic name: '" + topicName + "'");
+
+                            // Dump the topic name bytes for debugging
+                            StringBuilder topicHexDump = new StringBuilder("Topic name bytes: ");
+                            for (byte b : topicNameBytes) {
+                                topicHexDump.append(String.format("%02X ", b & 0xFF));
+                            }
+                            System.err.println(topicHexDump.toString());
+                        }
+
+                        // Skip partition IDs array if present
+                        if (buffer.remaining() >= 4) {
+                            int partitionCount = buffer.getInt();
+                            System.err.println("Partition count: " + partitionCount);
+
+                            // Skip partition IDs if any
+                            for (int i = 0; i < partitionCount && buffer.remaining() >= 4; i++) {
+                                int partitionId = buffer.getInt();
+                                System.err.println("Partition ID: " + partitionId);
+                            }
+                        }
                     }
                 }
-            }
 
-            // Read cursor if present
-            this.cursor = buffer.hasRemaining() ? buffer.get() : 0;
+                // Read cursor if present
+                if (buffer.hasRemaining()) {
+                    this.cursor = buffer.get();
+                    System.err.println("Cursor: " + (cursor & 0xFF));
+                }
+
+                // Read any remaining bytes for debugging
+                if (buffer.hasRemaining()) {
+                    StringBuilder remainingHex = new StringBuilder("Remaining bytes: ");
+                    while (buffer.hasRemaining()) {
+                        remainingHex.append(String.format("%02X ", buffer.get() & 0xFF));
+                    }
+                    System.err.println(remainingHex.toString());
+                }
+            } catch (Exception e) {
+                System.err.println("Error parsing request: " + e.getMessage());
+                e.printStackTrace();
+            }
 
             System.err.println("DescribeTopicPartitionsRequest: topic_name='" + topicName +
                               "', array_length=" + (arrayLength & 0xFF) +
@@ -796,7 +838,9 @@ public class Main {
 
             // Response body
             bodyBuffer.putInt(0); // throttle_time_ms
-            bodyBuffer.put(arrayLength); // topics_array_length
+
+            // Topics array - use 2 for compact array format (meaning 1 topic)
+            bodyBuffer.put((byte) 2); // topics_array_length
 
             // Topic entry
             TopicMetadata metadata = metadataReader.getTopicMetadata(topicName);
@@ -858,13 +902,21 @@ public class Main {
 
             bodyBuffer.putInt(0x00000DF8); // topic_authorized_operations
             bodyBuffer.put((byte) 0); // topic_tag_buffer
-            bodyBuffer.put(cursor); // cursor
+
+            // Tagged fields at end of response
             bodyBuffer.put((byte) 0); // response_tag_buffer
 
             // Create final message with size prefix
             byte[] responseBody = new byte[bodyBuffer.position()];
             bodyBuffer.flip();
             bodyBuffer.get(responseBody);
+
+            // Dump the response body for debugging
+            StringBuilder hexDump = new StringBuilder("Response body: ");
+            for (byte b : responseBody) {
+                hexDump.append(String.format("%02X ", b & 0xFF));
+            }
+            System.err.println(hexDump.toString());
 
             ByteBuffer finalBuffer = ByteBuffer.allocate(4 + responseBody.length);
             finalBuffer.order(ByteOrder.BIG_ENDIAN);
@@ -933,6 +985,13 @@ public class Main {
                 byte[] body = new byte[bodyLength];
                 if (bodyLength > 0) {
                     System.arraycopy(buffer, bodyStart, body, 0, bodyLength);
+
+                    // Dump the full request for debugging
+                    StringBuilder fullHexDump = new StringBuilder("Full request: ");
+                    for (int i = 0; i < bytesRead; i++) {
+                        fullHexDump.append(String.format("%02X ", buffer[i] & 0xFF));
+                    }
+                    System.err.println(fullHexDump.toString());
                 }
 
                 // Process based on API key
