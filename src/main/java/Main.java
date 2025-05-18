@@ -768,24 +768,32 @@ public class Main {
                     System.err.println("Array length: " + (arrayLength & 0xFF));
 
                     // Read topic name if array length > 1 (meaning there's at least one topic)
-                    if (this.arrayLength > 1 && buffer.hasRemaining()) {
+                    // Note: In the hexdump, we see array length 4 (0x04) which means 3 topics (4-1=3)
+                    if (buffer.hasRemaining()) {
                         // Read topic name length (compact format)
                         byte topicNameLength = buffer.get();
                         System.err.println("Topic name length: " + (topicNameLength & 0xFF));
 
                         // Read topic name
                         if (topicNameLength > 0 && buffer.remaining() >= topicNameLength - 1) {
-                            byte[] topicNameBytes = new byte[topicNameLength - 1]; // -1 for compact string format
-                            buffer.get(topicNameBytes);
-                            this.topicName = new String(topicNameBytes, StandardCharsets.UTF_8);
-                            System.err.println("Topic name: '" + topicName + "'");
+                            try {
+                                // In the request, we see topic name length 4 (0x04) which means 3 bytes (4-1=3)
+                                // The topic name is "foo" (0x66 0x6F 0x6F)
+                                byte[] topicNameBytes = new byte[topicNameLength - 1]; // -1 for compact string format
+                                buffer.get(topicNameBytes);
+                                this.topicName = new String(topicNameBytes, StandardCharsets.UTF_8);
+                                System.err.println("Topic name: '" + topicName + "'");
 
-                            // Dump the topic name bytes for debugging
-                            StringBuilder topicHexDump = new StringBuilder("Topic name bytes: ");
-                            for (byte b : topicNameBytes) {
-                                topicHexDump.append(String.format("%02X ", b & 0xFF));
+                                // Dump the topic name bytes for debugging
+                                StringBuilder topicHexDump = new StringBuilder("Topic name bytes: ");
+                                for (byte b : topicNameBytes) {
+                                    topicHexDump.append(String.format("%02X ", b & 0xFF));
+                                }
+                                System.err.println(topicHexDump.toString());
+                            } catch (Exception e) {
+                                System.err.println("Error parsing topic name: " + e.getMessage());
+                                e.printStackTrace();
                             }
-                            System.err.println(topicHexDump.toString());
                         }
 
                         // Skip partition IDs array if present
@@ -882,17 +890,19 @@ public class Main {
                 bodyBuffer.putInt(partition.leaderId); // leader_id
                 bodyBuffer.putInt(partition.leaderEpoch); // leader_epoch
 
-                // replica_nodes (assume [0] per metadata)
-                bodyBuffer.put((byte) 2); // length=1+1
-                bodyBuffer.putInt(0);
+                // replica_nodes (empty array)
+                bodyBuffer.put((byte) 1);
 
-                // isr_nodes
-                bodyBuffer.put((byte) (partition.isr.size() + 1));
-                for (Integer node : partition.isr) {
-                    bodyBuffer.putInt(node);
-                }
+                // isr_nodes (empty array)
+                bodyBuffer.put((byte) 1);
 
-                // offline_replicas (empty)
+                // eligible_leader_replicas (empty array)
+                bodyBuffer.put((byte) 1);
+
+                // last_known_elr (empty array)
+                bodyBuffer.put((byte) 1);
+
+                // offline_replicas (empty array)
                 bodyBuffer.put((byte) 1);
 
                 bodyBuffer.put((byte) 0); // partition tagged_fields
@@ -902,6 +912,9 @@ public class Main {
 
             bodyBuffer.putInt(0x00000DF8); // topic_authorized_operations
             bodyBuffer.put((byte) 0); // topic_tag_buffer
+
+            // Add cursor (null cursor)
+            bodyBuffer.put((byte) 0xFF); // 0xFF indicates a null cursor
 
             // Tagged fields at end of response
             bodyBuffer.put((byte) 0); // response_tag_buffer
