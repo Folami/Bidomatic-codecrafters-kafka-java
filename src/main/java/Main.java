@@ -752,77 +752,53 @@ public class Main {
                 }
                 System.err.println(hexDump.toString());
 
-                // Create a ByteBuffer to read the request body
-                ByteBuffer buffer = ByteBuffer.wrap(body);
-                buffer.order(ByteOrder.BIG_ENDIAN);
+                // Direct parsing approach based on the hexdump
+                // From the hexdump, we can see the format is:
+                // 02 04 62 61 72 00 00 00 00 01 FF 00
+                // 02 - Tagged field
+                // 04 - Array length (compact format, 4-1=3 topics)
+                // 04 - Topic name length (compact format, 4-1=3 bytes)
+                // 62 61 72 - "bar" in ASCII
+                // 00 00 00 00 - Partition count (0)
+                // 01 - Cursor
+                // FF 00 - End of request
 
-                // Skip tagged fields
-                if (buffer.hasRemaining()) {
-                    byte taggedField = buffer.get(); // Skip tagged fields
-                    System.err.println("Tagged field: " + taggedField);
-                }
+                if (body.length >= 3) {
+                    // Skip tagged field
+                    int index = 1;
 
-                // Read array length (compact format)
-                if (buffer.hasRemaining()) {
-                    this.arrayLength = buffer.get();
+                    // Read array length
+                    this.arrayLength = body[index++];
                     System.err.println("Array length: " + (arrayLength & 0xFF));
 
-                    // Read topic name if array length > 1 (meaning there's at least one topic)
-                    // Note: In the hexdump, we see array length 4 (0x04) which means 3 topics (4-1=3)
-                    if (buffer.hasRemaining()) {
-                        // Read topic name length (compact format)
-                        byte topicNameLength = buffer.get();
-                        System.err.println("Topic name length: " + (topicNameLength & 0xFF));
+                    // Read topic name length
+                    byte topicNameLength = body[index++];
+                    System.err.println("Topic name length: " + (topicNameLength & 0xFF));
 
-                        // Read topic name
-                        if (topicNameLength > 0 && buffer.remaining() >= topicNameLength - 1) {
-                            try {
-                                // In the request, we see topic name length 4 (0x04) which means 3 bytes (4-1=3)
-                                // The topic name is "foo" (0x66 0x6F 0x6F)
-                                byte[] topicNameBytes = new byte[topicNameLength - 1]; // -1 for compact string format
-                                buffer.get(topicNameBytes);
-                                this.topicName = new String(topicNameBytes, StandardCharsets.UTF_8);
-                                System.err.println("Topic name: '" + topicName + "'");
+                    // Read topic name
+                    int nameLength = (topicNameLength & 0xFF) - 1; // -1 for compact string format
+                    if (nameLength > 0 && index + nameLength <= body.length) {
+                        byte[] topicNameBytes = new byte[nameLength];
+                        System.arraycopy(body, index, topicNameBytes, 0, nameLength);
+                        this.topicName = new String(topicNameBytes, StandardCharsets.UTF_8);
 
-                                // Dump the topic name bytes for debugging
-                                StringBuilder topicHexDump = new StringBuilder("Topic name bytes: ");
-                                for (byte b : topicNameBytes) {
-                                    topicHexDump.append(String.format("%02X ", b & 0xFF));
-                                }
-                                System.err.println(topicHexDump.toString());
-                            } catch (Exception e) {
-                                System.err.println("Error parsing topic name: " + e.getMessage());
-                                e.printStackTrace();
-                            }
+                        // Dump the topic name bytes for debugging
+                        StringBuilder topicHexDump = new StringBuilder("Topic name bytes: ");
+                        for (byte b : topicNameBytes) {
+                            topicHexDump.append(String.format("%02X ", b & 0xFF));
                         }
+                        System.err.println(topicHexDump.toString());
+                        System.err.println("Topic name: '" + topicName + "'");
 
-                        // Skip partition IDs array if present
-                        if (buffer.remaining() >= 4) {
-                            int partitionCount = buffer.getInt();
-                            System.err.println("Partition count: " + partitionCount);
+                        // Skip to cursor (after partition count)
+                        index += nameLength + 4; // 4 bytes for partition count
 
-                            // Skip partition IDs if any
-                            for (int i = 0; i < partitionCount && buffer.remaining() >= 4; i++) {
-                                int partitionId = buffer.getInt();
-                                System.err.println("Partition ID: " + partitionId);
-                            }
+                        // Read cursor if within bounds
+                        if (index < body.length) {
+                            this.cursor = body[index];
+                            System.err.println("Cursor: " + (cursor & 0xFF));
                         }
                     }
-                }
-
-                // Read cursor if present
-                if (buffer.hasRemaining()) {
-                    this.cursor = buffer.get();
-                    System.err.println("Cursor: " + (cursor & 0xFF));
-                }
-
-                // Read any remaining bytes for debugging
-                if (buffer.hasRemaining()) {
-                    StringBuilder remainingHex = new StringBuilder("Remaining bytes: ");
-                    while (buffer.hasRemaining()) {
-                        remainingHex.append(String.format("%02X ", buffer.get() & 0xFF));
-                    }
-                    System.err.println(remainingHex.toString());
                 }
             } catch (Exception e) {
                 System.err.println("Error parsing request: " + e.getMessage());
@@ -850,14 +826,21 @@ public class Main {
             // Topics array - use 2 for compact array format (meaning 1 topic)
             bodyBuffer.put((byte) 2); // topics_array_length
 
-            // Topic entry
-            TopicMetadata metadata = metadataReader.getTopicMetadata(topicName);
-            boolean isKnown = metadata != null;
+            // Check if the topic exists in the metadata
+            TopicMetadata metadata = null;
+            boolean isKnown = false;
+
+            // Only check if topic name is not empty
+            if (!topicName.isEmpty()) {
+                metadata = metadataReader.getTopicMetadata(topicName);
+                isKnown = metadata != null;
+                System.err.println("Topic '" + topicName + "' exists: " + isKnown +
+                                  (isKnown ? ", UUID: " + metadata.topicId : ""));
+            } else {
+                System.err.println("Topic name is empty, returning unknown topic error");
+            }
+
             short errorCode = isKnown ? (short) 0 : (short) 3;
-
-            System.err.println("Topic '" + topicName + "' exists: " + isKnown +
-                              (isKnown ? ", UUID: " + metadata.topicId : ""));
-
             bodyBuffer.putShort(errorCode); // error_code
 
             // Topic name (compact string)
@@ -885,8 +868,8 @@ public class Main {
                                   ", leader=" + partition.leaderId +
                                   ", epoch=" + partition.leaderEpoch);
 
-                bodyBuffer.putInt(partition.partitionIndex); // partition_index
                 bodyBuffer.putShort((short) 0); // error_code
+                bodyBuffer.putInt(partition.partitionIndex); // partition_index
                 bodyBuffer.putInt(partition.leaderId); // leader_id
                 bodyBuffer.putInt(partition.leaderEpoch); // leader_epoch
 
