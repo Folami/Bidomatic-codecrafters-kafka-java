@@ -642,8 +642,8 @@ public class Main {
                     return;
                 }
 
-                // Skip tagged field
-                int index = 1;
+                // The body starts with the compact array length for topics
+                int index = 0;
 
                 // Read array length
                 byte arrayLength = body[index++];
