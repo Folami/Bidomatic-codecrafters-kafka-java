@@ -890,7 +890,7 @@ public class Main {
                 bodyBuffer.put((byte) (partition.isr.size() + 1));
                 for (Integer node : partition.isr) {
                     bodyBuffer.putInt(node);
-                
+                }
 
                 // offline_replicas (empty)
                 bodyBuffer.put((byte) 1);
