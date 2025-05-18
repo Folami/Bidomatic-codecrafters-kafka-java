@@ -626,28 +626,34 @@ public class Main {
             this.topicName = ""; // Default to empty string
 
             try {
-                // Skip the first byte (tagged field)
-                if (body.length < 1) {
+                // Direct parsing approach based on the hexdump format
+                // From the hexdump, we can see the format is:
+                // 02 04 62 61 72 00 00 00 00 01 FF 00
+                // 02 - Tagged field
+                // 04 - Array length (compact format, 4-1=3 topics)
+                // 04 - Topic name length (compact format, 4-1=3 bytes)
+                // 62 61 72 - "bar" in ASCII
+                // 00 00 00 00 - Partition count (0)
+                // 01 - Cursor
+                // FF 00 - End of request
+
+                if (body.length < 3) {
                     System.err.println("Request body too short");
                     return;
                 }
 
-                int index = 1; // Skip tagged field
+                // Skip tagged field
+                int index = 1;
 
-                // Read topics array length (compact format)
-                if (index >= body.length) {
-                    System.err.println("Request body too short for topics array length");
-                    return;
-                }
-
-                int topicsArrayLength = body[index++] & 0xFF;
-                int topicsCount = topicsArrayLength - 1; // Compact format: length - 1
+                // Read array length
+                byte arrayLength = body[index++];
+                int topicsCount = (arrayLength & 0xFF) - 1; // Compact format: length - 1
                 System.err.println("Number of topics: " + topicsCount);
 
                 if (topicsCount > 0 && index < body.length) {
-                    // Read topic name length (compact format)
-                    int topicNameLength = body[index++] & 0xFF;
-                    int nameLength = topicNameLength - 1; // Compact format: length - 1
+                    // Read topic name length
+                    byte topicNameLength = body[index++];
+                    int nameLength = (topicNameLength & 0xFF) - 1; // Compact format: length - 1
 
                     // Read topic name
                     if (nameLength > 0 && index + nameLength <= body.length) {
@@ -655,22 +661,6 @@ public class Main {
                         System.arraycopy(body, index, topicNameBytes, 0, nameLength);
                         this.topicName = new String(topicNameBytes, StandardCharsets.UTF_8);
                         System.err.println("Requested topic name: '" + this.topicName + "'");
-
-                        // Skip to partitions array
-                        index += nameLength;
-
-                        // Skip partitions array if present
-                        if (index + 4 <= body.length) {
-                            // Skip 4 bytes for partition count
-                            index += 4;
-                            System.err.println("Skipping partition array");
-                        }
-
-                        // Skip cursor
-                        if (index < body.length) {
-                            byte cursor = body[index];
-                            System.err.println("Cursor: " + cursor);
-                        }
                     }
                 }
 
@@ -895,62 +885,66 @@ public class Main {
         }
 
         public byte[] buildResponse() {
-            ByteBuffer bodyBuffer = ByteBuffer.allocate(64);
-            bodyBuffer.order(ByteOrder.BIG_ENDIAN);
+            // Create a buffer for the response body (excluding the size prefix)
+            ByteArrayOutputStream responseBody = new ByteArrayOutputStream();
 
-            // Response header
-            bodyBuffer.putInt(correlationId);
-            bodyBuffer.put((byte) 0); // Tagged fields
+            try {
+                // Response header: correlation ID
+                responseBody.write(ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN).putInt(correlationId).array());
 
-            // Response body
-            boolean isSupported = apiVersion >= 0 && apiVersion <= 4;
-            short errorCode = isSupported ? (short) 0 : (short) 35;
-            bodyBuffer.putShort(errorCode);
+                // Tagged fields in header
+                responseBody.write(0); // Empty tagged fields
 
-            // API keys array - handle based on apiVersion
-            if (isSupported && apiVersion == 4) {
-                // Empty API array for version 4: Compact array length 1 means 0 elements
-                bodyBuffer.put((byte) 1);
+                // Error code
+                boolean isSupported = apiVersion >= 0 && apiVersion <= 4;
+                short errorCode = isSupported ? (short) 0 : (short) 35;
+                responseBody.write(ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort(errorCode).array());
 
-                // Throttle time comes after the API keys array
-                bodyBuffer.putInt(0); // throttle_time_ms
+                // API keys array
+                if (isSupported && apiVersion == 4) {
+                    // For version 4, empty array (compact format: length 1 means 0 elements)
+                    responseBody.write(1);
+                } else {
+                    // For versions 0-3, include ApiVersions and DescribeTopicPartitions
+                    responseBody.write(3); // Compact array length (3-1=2 elements)
 
-                // Tagged fields at the end
-                bodyBuffer.put((byte) 0); // tag buffer
-            } else {
-                // Non-empty API array for versions 0-3: Compact array length 3 means 2 elements
-                bodyBuffer.put((byte) 3);
-                addApiKey(bodyBuffer, (short) 18, (short) 0, (short) 4); // ApiVersions
-                addApiKey(bodyBuffer, (short) 75, (short) 0, (short) 0); // DescribeTopicPartitions
+                    // ApiVersions (key 18)
+                    responseBody.write(ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 18).array());
+                    responseBody.write(ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 0).array());
+                    responseBody.write(ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 4).array());
+                    responseBody.write(0); // Tagged fields
 
-                // Throttle time comes after the API keys array
-                bodyBuffer.putInt(0); // throttle_time_ms
+                    // DescribeTopicPartitions (key 75)
+                    responseBody.write(ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 75).array());
+                    responseBody.write(ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 0).array());
+                    responseBody.write(ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 0).array());
+                    responseBody.write(0); // Tagged fields
+                }
 
-                // Tagged fields at the end
-                bodyBuffer.put((byte) 0); // tag buffer
+                // Throttle time (ms)
+                responseBody.write(ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN).putInt(0).array());
+
+                // Tagged fields at end of response
+                responseBody.write(0);
+
+                // Create the final message with size prefix
+                byte[] responseBytes = responseBody.toByteArray();
+                ByteBuffer finalBuffer = ByteBuffer.allocate(4 + responseBytes.length);
+                finalBuffer.order(ByteOrder.BIG_ENDIAN);
+                finalBuffer.putInt(responseBytes.length);
+                finalBuffer.put(responseBytes);
+
+                byte[] result = finalBuffer.array();
+                System.err.println("Built ApiVersions response (version " + apiVersion + "): " + bytesToHex(result));
+                return result;
+
+            } catch (IOException e) {
+                System.err.println("Error building ApiVersions response: " + e.getMessage());
+                return new byte[0];
             }
-
-            // Create final message with size prefix
-            byte[] responseBody = new byte[bodyBuffer.position()];
-            bodyBuffer.flip();
-            bodyBuffer.get(responseBody);
-
-            ByteBuffer finalBuffer = ByteBuffer.allocate(4 + responseBody.length);
-            finalBuffer.order(ByteOrder.BIG_ENDIAN);
-            finalBuffer.putInt(responseBody.length);
-            finalBuffer.put(responseBody);
-
-            System.err.println("Built ApiVersions response (version " + apiVersion + "): " + bytesToHex(finalBuffer.array()));
-
-            return finalBuffer.array();
         }
 
-        private void addApiKey(ByteBuffer buffer, short apiKey, short minVersion, short maxVersion) {
-            buffer.putShort(apiKey);
-            buffer.putShort(minVersion);
-            buffer.putShort(maxVersion);
-            buffer.put((byte) 0); // Empty tag buffer
-        }
+        // Method removed as it's no longer used
     }
 
     /**
