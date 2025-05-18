@@ -623,49 +623,62 @@ public class Main {
 
         public DescribeTopicPartitionsRequest(int correlationId, byte[] body) {
             this.correlationId = correlationId;
+            this.topicName = ""; // Default to empty string
 
             try {
-                ByteParser parser = new ByteParser(body);
-
-                // Topics array - compact array
-                int topicsCount = parser.consumeVarInt(false) - 1;
-                System.err.println("Number of topics: " + topicsCount);
-
-                if (topicsCount > 0) {
-                    // For simplicity, we're handling only the first topic for now
-
-                    // Topic name - compact string
-                    int topicNameLength = parser.consumeVarInt(false) - 1;
-                    byte[] topicNameBytes = parser.consume(topicNameLength);
-                    this.topicName = new String(topicNameBytes, StandardCharsets.UTF_8);
-                    System.err.println("Requested topic name: '" + this.topicName + "'");
-
-                    // Skip partitions array if present (not needed for this stage)
-                    if (!parser.eof()) {
-                        // Assumes an array of partitions, even if empty.
-                        int partitionArrayLength = parser.consumeVarInt(false) - 1;
-                        System.err.println("Skipping partition array of length: " + partitionArrayLength);
-                        // In a complete solution, you'd parse the partitions here if needed.
-                        // But since the tester only sends a topic name, we don't need this yet.
-                    }
-
-                    // Skip cursor
-                    if (!parser.eof()) {
-                        parser.consume(1); // Cursor is a single byte
-                    }
-                } else {
-                    this.topicName = ""; // Handle empty topic list
-                    System.err.println("Empty topic list in request.");
+                // Skip the first byte (tagged field)
+                if (body.length < 1) {
+                    System.err.println("Request body too short");
+                    return;
                 }
 
-                // You might want to log the parsed information for debugging.
-                System.err.println("Parsed DescribeTopicPartitions request: topicName='" + this.topicName + "'");
+                int index = 1; // Skip tagged field
 
+                // Read topics array length (compact format)
+                if (index >= body.length) {
+                    System.err.println("Request body too short for topics array length");
+                    return;
+                }
+
+                int topicsArrayLength = body[index++] & 0xFF;
+                int topicsCount = topicsArrayLength - 1; // Compact format: length - 1
+                System.err.println("Number of topics: " + topicsCount);
+
+                if (topicsCount > 0 && index < body.length) {
+                    // Read topic name length (compact format)
+                    int topicNameLength = body[index++] & 0xFF;
+                    int nameLength = topicNameLength - 1; // Compact format: length - 1
+
+                    // Read topic name
+                    if (nameLength > 0 && index + nameLength <= body.length) {
+                        byte[] topicNameBytes = new byte[nameLength];
+                        System.arraycopy(body, index, topicNameBytes, 0, nameLength);
+                        this.topicName = new String(topicNameBytes, StandardCharsets.UTF_8);
+                        System.err.println("Requested topic name: '" + this.topicName + "'");
+
+                        // Skip to partitions array
+                        index += nameLength;
+
+                        // Skip partitions array if present
+                        if (index + 4 <= body.length) {
+                            // Skip 4 bytes for partition count
+                            index += 4;
+                            System.err.println("Skipping partition array");
+                        }
+
+                        // Skip cursor
+                        if (index < body.length) {
+                            byte cursor = body[index];
+                            System.err.println("Cursor: " + cursor);
+                        }
+                    }
+                }
+
+                System.err.println("Parsed DescribeTopicPartitions request: topicName='" + this.topicName + "'");
             } catch (Exception e) {
                 System.err.println("Error parsing request: " + e.getMessage());
                 e.printStackTrace();
             }
-
         }
 
         public byte[] buildResponse() {
@@ -898,16 +911,24 @@ public class Main {
             if (isSupported && apiVersion == 4) {
                 // Empty API array for version 4: Compact array length 1 means 0 elements
                 bodyBuffer.put((byte) 1);
+
+                // Throttle time comes after the API keys array
+                bodyBuffer.putInt(0); // throttle_time_ms
+
+                // Tagged fields at the end
+                bodyBuffer.put((byte) 0); // tag buffer
             } else {
                 // Non-empty API array for versions 0-3: Compact array length 3 means 2 elements
                 bodyBuffer.put((byte) 3);
                 addApiKey(bodyBuffer, (short) 18, (short) 0, (short) 4); // ApiVersions
                 addApiKey(bodyBuffer, (short) 75, (short) 0, (short) 0); // DescribeTopicPartitions
-            }
 
-            // Throttle time and final tag buffer
-            bodyBuffer.putInt(0); // throttle_time_ms
-            bodyBuffer.put((byte) 0); // tag buffer
+                // Throttle time comes after the API keys array
+                bodyBuffer.putInt(0); // throttle_time_ms
+
+                // Tagged fields at the end
+                bodyBuffer.put((byte) 0); // tag buffer
+            }
 
             // Create final message with size prefix
             byte[] responseBody = new byte[bodyBuffer.position()];
