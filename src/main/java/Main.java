@@ -577,30 +577,26 @@ public class Main {
             // Response header: correlation ID
             response.write(ByteBuffer.allocate(4).putInt(correlationId).array());
 
-            // Error code
-            response.write(ByteBuffer.allocate(2).putShort(errorCode).array());
-
-            if (isSupported) {
-                // API keys array - compact array format
-                // Value 3 means 2 elements (3-1=2)
+            // API keys array - compact array format
+            if (isSupported && apiVersion == 4) {
+                // Empty array (version 4) - length 1 means 0 entries
+                response.write(1);
+            } else {
+                // API keys array - compact array format, 2 elements (length is 3 because of + 1 for compact array encoding)
                 response.write(3);
 
-                // First API key entry: ApiVersions (key 18)
-                response.write(ByteBuffer.allocate(2).putShort((short) 18).array());
+                // ApiVersions entry (api_key 18)
+                response.write(ByteBuffer.allocate(2).putShort((short) 18).array());  // api_key
                 response.write(ByteBuffer.allocate(2).putShort((short) 0).array());  // min_version
                 response.write(ByteBuffer.allocate(2).putShort((short) 4).array());  // max_version
                 response.write(0);  // Tagged fields (empty)
 
-                // Second API key entry: DescribeTopicPartitions (key 75)
-                response.write(ByteBuffer.allocate(2).putShort((short) 75).array());
+                // DescribeTopicPartitions entry (api_key 75)
+                response.write(ByteBuffer.allocate(2).putShort((short) 75).array());  // api_key
                 response.write(ByteBuffer.allocate(2).putShort((short) 0).array());  // min_version
                 response.write(ByteBuffer.allocate(2).putShort((short) 0).array());  // max_version
                 response.write(0);  // Tagged fields (empty)
-            } else {
-                // Empty API keys array for error case
-                response.write(1);  // Value 1 means 0 elements (1-1=0)
             }
-
             // Throttle time (ms)
             response.write(ByteBuffer.allocate(4).putInt(0).array());
 
