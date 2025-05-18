@@ -900,15 +900,10 @@ public class Main {
                 short errorCode = isSupported ? (short) 0 : (short) 35;
                 responseBody.write(ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort(errorCode).array());
 
-                // API keys array
-                if (isSupported && apiVersion == 4) {
-                    // For version 4, empty array (compact format: length 1 means 0 elements)
-                    // Based on YK1 test failure (throttle_time_ms=16M, 1 byte remaining),
-                    // it seems this specific tester for v4 expects NO bytes for an empty ApiKeys array,
-                    // directly followed by throttle_time_ms.
-                    // So, we omit writing the compact array length for v4.
-                } else {
-                    // For versions 0-3, include ApiVersions and DescribeTopicPartitions
+                // API keys array - adjust based on success or error
+                if (errorCode == 0) { // Success case for any supported version (0-4)
+                    // YK1 test now expects ApiKeys for v4 success.
+                    // So, for all successful supported versions, include ApiVersions and DescribeTopicPartitions.
                     responseBody.write(3); // Compact array length (3-1=2 elements)
 
                     // ApiVersions (key 18)
@@ -916,12 +911,14 @@ public class Main {
                     responseBody.write(ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 0).array());
                     responseBody.write(ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 4).array());
                     responseBody.write(0); // Tagged fields
-
                     // DescribeTopicPartitions (key 75)
                     responseBody.write(ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 75).array());
                     responseBody.write(ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 0).array());
                     responseBody.write(ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 0).array());
                     responseBody.write(0); // Tagged fields
+                } else { // Error case (unsupported version)
+                    // Empty array (compact format: length 1 means 0 elements)
+                    responseBody.write(1);
                 }
 
                 // Throttle time (ms)
