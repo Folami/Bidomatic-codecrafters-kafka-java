@@ -889,31 +889,23 @@ public class Main {
             bodyBuffer.putInt(correlationId);
             bodyBuffer.put((byte) 0); // Tagged fields
 
-            // Error code
+            // Response body
             boolean isSupported = apiVersion >= 0 && apiVersion <= 4;
             short errorCode = isSupported ? (short) 0 : (short) 35;
             bodyBuffer.putShort(errorCode);
 
-            // API keys array
-            if (isSupported) {
-                bodyBuffer.put((byte) 3); // 3 means 2 elements (3-1=2)
-
-                // ApiVersions (key 18)
-                bodyBuffer.putShort((short) 18);
-                bodyBuffer.putShort((short) 0); // min_version
-                bodyBuffer.putShort((short) 4); // max_version
-                bodyBuffer.put((byte) 0); // tag buffer
-
-                // DescribeTopicPartitions (key 75)
-                bodyBuffer.putShort((short) 75);
-                bodyBuffer.putShort((short) 0); // min_version
-                bodyBuffer.putShort((short) 0); // max_version
-                bodyBuffer.put((byte) 0); // tag buffer
+            // API keys array - handle based on apiVersion
+            if (isSupported && apiVersion == 4) {
+                // Empty API array for version 4: Compact array length 1 means 0 elements
+                bodyBuffer.put((byte) 1);
             } else {
-                bodyBuffer.put((byte) 1); // 1 means 0 elements (1-1=0)
+                // Non-empty API array for versions 0-3: Compact array length 3 means 2 elements
+                bodyBuffer.put((byte) 3);
+                addApiKey(bodyBuffer, (short) 18, (short) 0, (short) 4); // ApiVersions
+                addApiKey(bodyBuffer, (short) 75, (short) 0, (short) 0); // DescribeTopicPartitions
             }
 
-            // Throttle time and tag buffer
+            // Throttle time and final tag buffer
             bodyBuffer.putInt(0); // throttle_time_ms
             bodyBuffer.put((byte) 0); // tag buffer
 
@@ -927,7 +919,16 @@ public class Main {
             finalBuffer.putInt(responseBody.length);
             finalBuffer.put(responseBody);
 
+            System.err.println("Built ApiVersions response (version " + apiVersion + "): " + bytesToHex(finalBuffer.array()));
+
             return finalBuffer.array();
+        }
+
+        private void addApiKey(ByteBuffer buffer, short apiKey, short minVersion, short maxVersion) {
+            buffer.putShort(apiKey);
+            buffer.putShort(minVersion);
+            buffer.putShort(maxVersion);
+            buffer.put((byte) 0); // Empty tag buffer
         }
     }
 
