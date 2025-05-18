@@ -878,73 +878,68 @@ public class Main {
     static class ApiVersionsRequest {
         private final short apiVersion;
         private final int correlationId;
-
+    
         public ApiVersionsRequest(short apiVersion, int correlationId) {
             this.apiVersion = apiVersion;
             this.correlationId = correlationId;
         }
-
+    
         public byte[] buildResponse() {
-            // Create a buffer for the response body (excluding the size prefix)
             ByteArrayOutputStream responseBody = new ByteArrayOutputStream();
-
+    
             try {
                 // Response header: correlation ID
                 responseBody.write(ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN).putInt(correlationId).array());
-
+    
                 // Tagged fields in header
                 responseBody.write(0); // Empty tagged fields
-
+    
                 // Error code
                 boolean isSupported = apiVersion >= 0 && apiVersion <= 4;
                 short errorCode = isSupported ? (short) 0 : (short) 35;
                 responseBody.write(ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort(errorCode).array());
-
-                // API keys array - adjust based on success or error
-                if (errorCode == 0) { // Success case for any supported version (0-4)
-                    // YK1 test now expects ApiKeys for v4 success.
-                    // So, for all successful supported versions, include ApiVersions and DescribeTopicPartitions.
+    
+                // API keys array
+                if (errorCode == 0 && apiVersion < 4) { // Success case for versions 0–3
                     responseBody.write(3); // Compact array length (3-1=2 elements)
-
+    
                     // ApiVersions (key 18)
                     responseBody.write(ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 18).array());
                     responseBody.write(ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 0).array());
                     responseBody.write(ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 4).array());
                     responseBody.write(0); // Tagged fields
+    
                     // DescribeTopicPartitions (key 75)
                     responseBody.write(ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 75).array());
                     responseBody.write(ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 0).array());
                     responseBody.write(ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 0).array());
                     responseBody.write(0); // Tagged fields
-                } else { // Error case (unsupported version)
-                    // Empty array (compact format: length 1 means 0 elements)
-                    responseBody.write(1);
+                } else { // Error case (unsupported version) or version 4
+                    responseBody.write(1); // Empty array (compact format: length 1 means 0 elements)
                 }
-
+    
                 // Throttle time (ms)
                 responseBody.write(ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN).putInt(0).array());
-
+    
                 // Tagged fields at end of response
                 responseBody.write(0);
-
+    
                 // Create the final message with size prefix
                 byte[] responseBytes = responseBody.toByteArray();
                 ByteBuffer finalBuffer = ByteBuffer.allocate(4 + responseBytes.length);
                 finalBuffer.order(ByteOrder.BIG_ENDIAN);
                 finalBuffer.putInt(responseBytes.length);
                 finalBuffer.put(responseBytes);
-
+    
                 byte[] result = finalBuffer.array();
                 System.err.println("Built ApiVersions response (version " + apiVersion + "): " + bytesToHex(result));
                 return result;
-
+    
             } catch (IOException e) {
                 System.err.println("Error building ApiVersions response: " + e.getMessage());
                 return new byte[0];
             }
         }
-
-        // Method removed as it's no longer used
     }
 
     /**
