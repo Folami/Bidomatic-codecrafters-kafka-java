@@ -619,195 +619,57 @@ public class Main {
     }
 
     /**
-     * Result class for parsing DescribeTopicPartitions request, mimicking Python's parse_describe_topic_partitions.
-     */
-    public static class DescribeTopicPartitionsParseResult {
-        public final String topicName;
-        public final byte arrayLength;
-        public final byte topicNameLength;
-        public final byte cursor;
-
-        public DescribeTopicPartitionsParseResult(String topicName, byte arrayLength, byte topicNameLength, byte cursor) {
-            this.topicName = topicName;
-            this.arrayLength = arrayLength;
-            this.topicNameLength = topicNameLength;
-            this.cursor = cursor;
-        }
-    }
-
-    /**
-     * Parses a DescribeTopicPartitions (v0) request body, mimicking Python's parse_describe_topic_partitions.
-     * The request body format (compact, as per Python):
-     *  - topics: compact array of topics:
-     *       int8 topicsCount (1 byte)
-     *       For each topic:
-     *          string topic_name (1-byte length + UTF-8 bytes)
-     *          int32 partitionsCount
-     *          For each partition: int32 partition id
-     * Returns the first topic name, array_length, topic_name_length, and cursor.
-     */
-    public static DescribeTopicPartitionsParseResult parseDescribeTopicPartitionsRequest(
-            InputStream in,
-            int remaining,
-            int clientIdLen
-        ) throws IOException {
-        int bytesConsumed = 0;
-        byte arrayLength = 0;
-        byte topicNameLength = 0;
-        byte cursor = 0;
-        String topicName = "";
-
-        // Read array_length (1 byte, compact)
-        if (remaining < 1) {
-            System.err.println("P_DTP_R: Body too small for array_length (" + remaining + " bytes).");
-            return new DescribeTopicPartitionsParseResult("", (byte) 0, (byte) 0, (byte) 0);
-        }
-        byte[] arrayLengthBytes = readNBytes(in, 1);
-        arrayLength = arrayLengthBytes[0];
-        bytesConsumed += 1;
-        System.err.println("P_DTP_R: array_length=" + (arrayLength & 0xFF));
-
-        // Read topic_name_length (1 byte, compact)
-        if (remaining - bytesConsumed < 1) {
-            System.err.println("P_DTP_R: Not enough data for topic_name_length. Remaining: " + (remaining - bytesConsumed));
-            return new DescribeTopicPartitionsParseResult("", arrayLength, (byte) 0, (byte) 0);
-        }
-        byte[] topicNameLengthBytes = readNBytes(in, 1);
-        topicNameLength = topicNameLengthBytes[0];
-        bytesConsumed += 1;
-        System.err.println("P_DTP_R: topic_name_length=" + (topicNameLength & 0xFF));
-
-        // Read topic_name (topicNameLength - 1 bytes, to match Python bug)
-        int topicBytesToRead = (topicNameLength & 0xFF) - 1;
-        if (topicBytesToRead > 0) {
-            if (topicBytesToRead > remaining - bytesConsumed) {
-                System.err.println("P_DTP_R: Stated topic_name length " + topicBytesToRead + " exceeds remaining bytes " + (remaining - bytesConsumed));
-                return new DescribeTopicPartitionsParseResult("", arrayLength, topicNameLength, (byte) 0);
-            }
-            byte[] topicNameBytes = readNBytes(in, topicBytesToRead);
-            bytesConsumed += topicBytesToRead;
-            try {
-                topicName = new String(topicNameBytes, StandardCharsets.UTF_8);
-            } catch (Exception e) {
-                System.err.println("P_DTP_R: Topic_name decode error: " + e.getMessage());
-                topicName = "";
-            }
-        }
-        System.err.println("P_DTP_R: topic_name='" + topicName + "'");
-
-        // Skip to cursor (topic_name_starter + topic_name_length + 4)
-        int cursorOffset = 14 + clientIdLen + 1 + 2 + (topicNameLength & 0xFF) + 4;
-        int bytesToSkip = cursorOffset - (14 + clientIdLen + 1 + bytesConsumed);
-        if (bytesToSkip > 0) {
-            if (bytesToSkip > remaining - bytesConsumed) {
-                System.err.println("P_DTP_R: Cannot skip " + bytesToSkip + " bytes to cursor. Remaining: " + (remaining - bytesConsumed));
-                return new DescribeTopicPartitionsParseResult(topicName, arrayLength, topicNameLength, (byte) 0);
-            }
-            discardRemainingRequest(in, bytesToSkip);
-            bytesConsumed += bytesToSkip;
-        }
-
-        // Read cursor (1 byte)
-        if (remaining - bytesConsumed >= 1) {
-            byte[] cursorBytes = readNBytes(in, 1);
-            cursor = cursorBytes[0];
-            bytesConsumed += 1;
-            System.err.println("P_DTP_R: cursor=" + (cursor & 0xFF));
-        } else {
-            System.err.println("P_DTP_R: Not enough data for cursor. Remaining: " + (remaining - bytesConsumed));
-        }
-
-        // Discard remaining bytes
-        int unparsedBytes = remaining - bytesConsumed;
-        if (unparsedBytes > 0) {
-            System.err.println("P_DTP_R: Discarding " + unparsedBytes + " unparsed bytes.");
-            discardRemainingRequest(in, unparsedBytes);
-        }
-
-        return new DescribeTopicPartitionsParseResult(topicName, arrayLength, topicNameLength, cursor);
-    }
-
-    /**
      * Class for handling DescribeTopicPartitions requests.
      */
     static class DescribeTopicPartitionsRequest {
         private final int correlationId;
         private String topicName;
-        private byte arrayLength;
-        private byte cursor;
 
         public DescribeTopicPartitionsRequest(int correlationId, byte[] body) {
             this.correlationId = correlationId;
 
-            // Initialize default values
-            this.topicName = "";
-            this.arrayLength = 0;
-            this.cursor = 0;
-
             try {
-                // Dump the request body for debugging
-                StringBuilder hexDump = new StringBuilder("Request body: ");
-                for (byte b : body) {
-                    hexDump.append(String.format("%02X ", b & 0xFF));
-                }
-                System.err.println(hexDump.toString());
+                ByteParser parser = new ByteParser(body);
 
-                // Direct parsing approach based on the hexdump
-                // From the hexdump, we can see the format is:
-                // 02 04 62 61 72 00 00 00 00 01 FF 00
-                // 02 - Tagged field
-                // 04 - Array length (compact format, 4-1=3 topics)
-                // 04 - Topic name length (compact format, 4-1=3 bytes)
-                // 62 61 72 - "bar" in ASCII
-                // 00 00 00 00 - Partition count (0)
-                // 01 - Cursor
-                // FF 00 - End of request
+                // Topics array - compact array
+                int topicsCount = parser.consumeVarInt(false) - 1;
+                System.err.println("Number of topics: " + topicsCount);
 
-                if (body.length >= 3) {
-                    // Skip tagged field
-                    int index = 1;
+                if (topicsCount > 0) {
+                    // For simplicity, we're handling only the first topic for now
 
-                    // Read array length
-                    this.arrayLength = body[index++];
-                    System.err.println("Array length: " + (arrayLength & 0xFF));
+                    // Topic name - compact string
+                    int topicNameLength = parser.consumeVarInt(false) - 1;
+                    byte[] topicNameBytes = parser.consume(topicNameLength);
+                    this.topicName = new String(topicNameBytes, StandardCharsets.UTF_8);
+                    System.err.println("Requested topic name: '" + this.topicName + "'");
 
-                    // Read topic name length
-                    byte topicNameLength = body[index++];
-                    System.err.println("Topic name length: " + (topicNameLength & 0xFF));
-
-                    // Read topic name
-                    int nameLength = (topicNameLength & 0xFF) - 1; // -1 for compact string format
-                    if (nameLength > 0 && index + nameLength <= body.length) {
-                        byte[] topicNameBytes = new byte[nameLength];
-                        System.arraycopy(body, index, topicNameBytes, 0, nameLength);
-                        this.topicName = new String(topicNameBytes, StandardCharsets.UTF_8);
-
-                        // Dump the topic name bytes for debugging
-                        StringBuilder topicHexDump = new StringBuilder("Topic name bytes: ");
-                        for (byte b : topicNameBytes) {
-                            topicHexDump.append(String.format("%02X ", b & 0xFF));
-                        }
-                        System.err.println(topicHexDump.toString());
-                        System.err.println("Topic name: '" + topicName + "'");
-
-                        // Skip to cursor (after partition count)
-                        index += nameLength + 4; // 4 bytes for partition count
-
-                        // Read cursor if within bounds
-                        if (index < body.length) {
-                            this.cursor = body[index];
-                            System.err.println("Cursor: " + (cursor & 0xFF));
-                        }
+                    // Skip partitions array if present (not needed for this stage)
+                    if (!parser.eof()) {
+                        // Assumes an array of partitions, even if empty.
+                        int partitionArrayLength = parser.consumeVarInt(false) - 1;
+                        System.err.println("Skipping partition array of length: " + partitionArrayLength);
+                        // In a complete solution, you'd parse the partitions here if needed.
+                        // But since the tester only sends a topic name, we don't need this yet.
                     }
+
+                    // Skip cursor
+                    if (!parser.eof()) {
+                        parser.consume(1); // Cursor is a single byte
+                    }
+                } else {
+                    this.topicName = ""; // Handle empty topic list
+                    System.err.println("Empty topic list in request.");
                 }
+
+                // You might want to log the parsed information for debugging.
+                System.err.println("Parsed DescribeTopicPartitions request: topicName='" + this.topicName + "'");
+
             } catch (Exception e) {
                 System.err.println("Error parsing request: " + e.getMessage());
                 e.printStackTrace();
             }
 
-            System.err.println("DescribeTopicPartitionsRequest: topic_name='" + topicName +
-                              "', array_length=" + (arrayLength & 0xFF) +
-                              ", cursor=" + (cursor & 0xFF));
         }
 
         public byte[] buildResponse() {
