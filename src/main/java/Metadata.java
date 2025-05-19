@@ -12,7 +12,7 @@ import java.util.UUID;
  */
 public class Metadata {
     private static final UUID BASE_UUID = new UUID(0L, 0L);
-
+    
     private ByteParser parser;
     private int batches = 0;
     private Map<String, Map<String, Object>> topics = new HashMap<>();

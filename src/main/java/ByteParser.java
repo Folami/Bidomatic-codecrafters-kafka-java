@@ -103,15 +103,12 @@ public class ByteParser {
         int value = 0;
         int aux = MSB_SET_MASK;
         int currentIndex = index;
-        byte[] record = new byte[0]; // Not used in Java but mimics Python
-
         while ((aux & MSB_SET_MASK) != 0) {
             if (currentIndex >= data.length) {
                 throw new IllegalArgumentException("Not enough bytes to read variable int");
             }
 
             aux = data[currentIndex] & 0xFF;
-            // In Python: record += aux.to_bytes() - not needed in Java
             value += (aux & REMOVE_MSB_MASK) << shift;
             currentIndex++;
             shift += 7;
