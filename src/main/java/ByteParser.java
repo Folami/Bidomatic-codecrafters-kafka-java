@@ -1,5 +1,6 @@
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.util.Arrays;
 
 /**
  * ByteParser class for parsing binary data, mimicking parser.py's ByteParser.

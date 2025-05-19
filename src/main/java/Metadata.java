@@ -52,7 +52,7 @@ public class Metadata {
         while (!parser.eof()) {
             byte[] offset = parser.consume(8);
             System.err.println("offset " + ByteBuffer.wrap(offset).order(ByteOrder.BIG_ENDIAN).getLong());
-            batches++;
+            this.batches++; // Fixed: Increment int field, not List
             int batchLength = parser.consumeInt();
             batches.add(parser.consume(batchLength));
         }
