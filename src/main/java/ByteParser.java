@@ -1,19 +1,18 @@
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+
 /**
- * ByteParser class for parsing binary data.
- * This class mimics the functionality of the Python ByteParser class.
+ * ByteParser class for parsing binary data, mimicking parser.py's ByteParser.
  */
 public class ByteParser {
-    private static final int MSB_SET_MASK = 0b10000000;
-    private static final int REMOVE_MSB_MASK = 0b01111111;
-
     private final byte[] data;
     private int index;
     private boolean finished;
 
-    /**
-     * Constructor for ByteParser.
-     * @param data The byte array to parse.
-     */
+    // Constants for VARINT parsing
+    private static final int MSB_SET_MASK = 0x80;
+    private static final int REMOVE_MSB_MASK = 0x7F;
+
     public ByteParser(byte[] data) {
         this.data = data;
         this.index = 0;
@@ -21,72 +20,62 @@ public class ByteParser {
     }
 
     /**
-     * Check if we've reached the end of the data.
-     * @return true if we've reached the end of the data.
+     * Checks if the end of the data has been reached.
      */
     public boolean eof() {
-        return index >= data.length;
+        return index == data.length;
     }
 
     /**
-     * Update the finished flag based on the current index.
+     * Updates the finished flag based on the current index.
      */
     private void checkIsFinished() {
-        this.finished = index >= data.length;
+        finished = index == data.length;
     }
 
     /**
-     * Read bytes without advancing the index.
-     * @param numBytes The number of bytes to read.
-     * @return The bytes read.
+     * Reads numBytes from the current position without advancing the index.
      */
     public byte[] read(int numBytes) {
         if (index + numBytes > data.length) {
-            throw new IllegalArgumentException("Not enough bytes to read");
+            throw new IllegalArgumentException("Not enough bytes to read: need " + numBytes + ", available " + (data.length - index));
         }
-        byte[] result = new byte[numBytes];
-        System.arraycopy(data, index, result, 0, numBytes);
-        return result;
+        return Arrays.copyOfRange(data, index, index + numBytes);
     }
 
     /**
-     * Read bytes and advance the index.
-     * @param numBytes The number of bytes to read.
-     * @return The bytes read.
+     * Consumes numBytes from the current position, advancing the index.
      */
     public byte[] consume(int numBytes) {
         if (index + numBytes > data.length) {
-            throw new IllegalArgumentException("Not enough bytes to read");
+            throw new IllegalArgumentException("Not enough bytes to consume: need " + numBytes + ", available " + (data.length - index));
         }
-        byte[] result = new byte[numBytes];
-        System.arraycopy(data, index, result, 0, numBytes);
+        byte[] result = Arrays.copyOfRange(data, index, index + numBytes);
         index += numBytes;
         checkIsFinished();
         return result;
     }
 
     /**
-     * Skip bytes by advancing the index.
-     * @param numBytes The number of bytes to skip.
+     * Skips numBytes in the stream by advancing the index.
      */
     public void skip(int numBytes) {
         if (index + numBytes > data.length) {
-            throw new IllegalArgumentException("Not enough bytes to skip");
+            throw new IllegalArgumentException("Not enough bytes to skip: need " + numBytes + ", available " + (data.length - index));
         }
         index += numBytes;
         checkIsFinished();
     }
 
     /**
-     * Get the number of remaining bytes.
-     * @return The number of remaining bytes.
+     * Returns the number of remaining bytes.
      */
     public int remaining() {
         return data.length - index;
     }
 
     /**
-     * Reset the index to the start.
+     * Resets the index to the start.
      */
     public void reset() {
         index = 0;
@@ -94,28 +83,26 @@ public class ByteParser {
     }
 
     /**
-     * Read a variable-length integer.
-     * @param signed Whether the integer is signed.
-     * @return The integer value.
+     * Consumes a variable-length integer (VARINT), optionally signed.
      */
     public int consumeVarInt(boolean signed) {
         int shift = 0;
         int value = 0;
         int aux = MSB_SET_MASK;
-        int currentIndex = index;
+        int startIndex = index;
+
         while ((aux & MSB_SET_MASK) != 0) {
-            if (currentIndex >= data.length) {
-                throw new IllegalArgumentException("Not enough bytes to read variable int");
+            if (index >= data.length) {
+                throw new IllegalArgumentException("Not enough bytes to read VARINT at index " + startIndex);
             }
-
-            aux = data[currentIndex] & 0xFF;
+            aux = data[index] & 0xFF;
             value += (aux & REMOVE_MSB_MASK) << shift;
-            currentIndex++;
+            index++;
             shift += 7;
+            if (shift > 35) { // Prevent overflow (5 bytes max for 32-bit int)
+                throw new IllegalArgumentException("VARINT too long at index " + startIndex);
+            }
         }
-
-        index = currentIndex;
-        checkIsFinished();
 
         if (signed) {
             int lsb = value & 0x01;
@@ -126,14 +113,15 @@ public class ByteParser {
             }
         }
 
+        checkIsFinished();
         return value;
     }
 
     /**
-     * Check if parsing is finished.
-     * @return true if parsing is finished.
+     * Consumes a 4-byte integer.
      */
-    public boolean isFinished() {
-        return finished;
+    public int consumeInt() {
+        byte[] bytes = consume(4);
+        return ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN).getInt();
     }
 }
