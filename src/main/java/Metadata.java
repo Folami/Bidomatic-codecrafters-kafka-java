@@ -1,3 +1,5 @@
+// package codecrafters_kafka_java; // Uncomment if using package
+
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.*;
@@ -18,9 +20,6 @@ public class Metadata {
         linkPartitionsToTopics();
     }
 
-    /**
-     * Links partitions to their topics based on UUID.
-     */
     private void linkPartitionsToTopics() {
         for (Map.Entry<byte[], PartitionInfo> partitionEntry : partitions.entrySet()) {
             UUID topicUuid = partitionEntry.getValue().topicUuid;
@@ -33,9 +32,6 @@ public class Metadata {
         }
     }
 
-    /**
-     * Parses the entire log file into batches.
-     */
     private void parseLogFile(byte[] file) {
         List<byte[]> batches = separateBatches(file);
         for (byte[] batch : batches) {
@@ -43,25 +39,19 @@ public class Metadata {
         }
     }
 
-    /**
-     * Separates the log into batches.
-     */
     private List<byte[]> separateBatches(byte[] file) {
         ByteParser parser = new ByteParser(file);
         List<byte[]> batches = new ArrayList<>();
         while (!parser.eof()) {
             byte[] offset = parser.consume(8);
             System.err.println("offset " + ByteBuffer.wrap(offset).order(ByteOrder.BIG_ENDIAN).getLong());
-            this.batches++; // Fixed: Increment int field, not List
+            this.batches++;
             int batchLength = parser.consumeInt();
             batches.add(parser.consume(batchLength));
         }
         return batches;
     }
 
-    /**
-     * Parses a single batch into records.
-     */
     private void parseBatch(byte[] batch) {
         ByteParser parser = new ByteParser(batch);
         parser.consume(4); // ple
@@ -81,9 +71,6 @@ public class Metadata {
         }
     }
 
-    /**
-     * Separates records from a batch.
-     */
     private List<byte[]> separateRecords(ByteParser parser) {
         List<byte[]> records = new ArrayList<>();
         while (!parser.eof()) {
@@ -94,9 +81,6 @@ public class Metadata {
         return records;
     }
 
-    /**
-     * Parses a single record.
-     */
     private void parseRecord(byte[] batch) {
         ByteParser parser = new ByteParser(batch);
         parser.consume(1); // attribute
@@ -111,9 +95,6 @@ public class Metadata {
         parseValue(value);
     }
 
-    /**
-     * Parses a record value (topic or partition).
-     */
     private void parseValue(byte[] value) {
         ByteParser parser = new ByteParser(value);
         parser.consume(1); // frame_version
@@ -130,9 +111,6 @@ public class Metadata {
         }
     }
 
-    /**
-     * Parses a topic record (type=2).
-     */
     private void parseTopic(ByteParser parser) {
         parser.consume(1); // version
         int lengthOfName = parser.consumeVarInt(false) - 1;
@@ -145,9 +123,6 @@ public class Metadata {
         topics.put(topicName, new TopicInfo(uuid, new ArrayList<>()));
     }
 
-    /**
-     * Parses a partition record (type=3).
-     */
     private void parsePartition(ByteParser parser) {
         parser.consume(1); // version
         byte[] partitionId = parser.consume(4);
@@ -169,9 +144,6 @@ public class Metadata {
         partitions.put(partitionId, new PartitionInfo(partitionId, leader, epoch, topicUuid));
     }
 
-    /**
-     * Digests an array of fixed-size items.
-     */
     private List<Integer> digestArray(ByteParser parser, int length, int sizePerItem) {
         List<Integer> ret = new ArrayList<>();
         for (int i = 0; i < length; i++) {
@@ -189,9 +161,6 @@ public class Metadata {
         return partitions;
     }
 
-    /**
-     * TopicInfo class for topic metadata.
-     */
     public static class TopicInfo {
         public final UUID uuid;
         public final List<byte[]> partitions;
@@ -202,9 +171,6 @@ public class Metadata {
         }
     }
 
-    /**
-     * PartitionInfo class for partition metadata.
-     */
     public static class PartitionInfo {
         public final byte[] id;
         public final int leader;

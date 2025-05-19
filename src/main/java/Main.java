@@ -1,3 +1,5 @@
+// package codecrafters_kafka_java; // Uncomment if using package
+
 import java.io.*;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -37,6 +39,7 @@ abstract class BaseKafka {
 
     protected StringResult parseString(byte[] buffer) {
         if (buffer.length < 2) {
+            System.err.println("Buffer too short for string length: " + buffer.length);
             throw new IllegalArgumentException("Buffer too short for string length");
         }
         short length = ByteBuffer.wrap(buffer, 0, 2).order(ByteOrder.BIG_ENDIAN).getShort();
@@ -44,6 +47,7 @@ abstract class BaseKafka {
             return new StringResult("", Arrays.copyOfRange(buffer, 2, buffer.length));
         }
         if (buffer.length < 2 + length) {
+            System.err.println("Buffer too short for string data: need " + (2 + length) + ", got " + buffer.length);
             throw new IllegalArgumentException("Buffer too short for string data");
         }
         String str = new String(buffer, 2, length, StandardCharsets.UTF_8);
@@ -62,16 +66,19 @@ abstract class BaseKafka {
 
     protected byte[] parseArray(byte[] buffer, java.util.function.Consumer<byte[]> func) {
         if (buffer.length < 1) {
+            System.err.println("Buffer too short for array length: " + buffer.length);
             throw new IllegalArgumentException("Buffer too short for array length");
         }
         int arrLength = (buffer[0] & 0xFF) - 1;
         byte[] arrBuffer = Arrays.copyOfRange(buffer, 1, buffer.length);
         for (int i = 0; i < arrLength; i++) {
             if (arrBuffer.length < 1) {
+                System.err.println("Buffer too short for array item at index " + i);
                 throw new IllegalArgumentException("Buffer too short for array item");
             }
             int itemLength = (arrBuffer[0] & 0xFF);
             if (arrBuffer.length < 1 + itemLength) {
+                System.err.println("Buffer too short for item data: need " + (1 + itemLength) + ", got " + arrBuffer.length);
                 throw new IllegalArgumentException("Buffer too short for item data");
             }
             byte[] itemBuffer = Arrays.copyOfRange(arrBuffer, 1, 1 + itemLength);
@@ -97,6 +104,7 @@ class KafkaHeader extends BaseKafka {
 
     public KafkaHeader(byte[] data) {
         if (data.length < 12) {
+            System.err.println("Data too short for header: " + data.length);
             throw new IllegalArgumentException("Data too short for header");
         }
         this.length = Arrays.copyOfRange(data, 0, 4);
@@ -272,7 +280,7 @@ public class Main {
             byte[] buffer = new byte[1024];
             int bytesRead;
             while ((bytesRead = in.read(buffer)) != -1) {
-                byte[] data = Arrays.copyOf(buffer, bytesRead);
+                byte[] data = Arrays.copyOfRange(buffer, 0, bytesRead);
                 KafkaHeader header = new KafkaHeader(data);
                 byte[] message;
                 if (header.keyInt == 18) {
