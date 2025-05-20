@@ -43,7 +43,7 @@ public class Main {
          * @param message The message bytes.
          * @return The message with size prefix.
          */
-        protected byte[] createMessage(byte[] message) {
+        protected byte[] _create_message(byte[] message) {
             ByteBuffer buffer = ByteBuffer.allocate(4 + message.length);
             buffer.order(ByteOrder.BIG_ENDIAN);
             buffer.putInt(message.length);
@@ -56,7 +56,7 @@ public class Main {
          * @param buffer The buffer.
          * @return The buffer without the tag buffer.
          */
-        protected byte[] removeTagBuffer(byte[] buffer) {
+        protected byte[] _remove_tag_buffer(byte[] buffer) {
             byte[] result = new byte[buffer.length - 1];
             System.arraycopy(buffer, 1, result, 0, buffer.length - 1);
             return result;
@@ -67,13 +67,15 @@ public class Main {
          * @param buffer The buffer.
          * @return The string and the remaining buffer.
          */
-        protected StringParseResult parseString(byte[] buffer) {
+        protected StringParseResult _parse_string(byte[] buffer) {
             int length = ByteBuffer.wrap(buffer, 0, 2).order(ByteOrder.BIG_ENDIAN).getShort() & 0xFFFF;
             byte[] stringBytes = new byte[length];
             System.arraycopy(buffer, 2, stringBytes, 0, length);
             String string = new String(stringBytes, StandardCharsets.UTF_8);
+
             byte[] remaining = new byte[buffer.length - 2 - length];
             System.arraycopy(buffer, 2 + length, remaining, 0, buffer.length - 2 - length);
+
             return new StringParseResult(string, remaining);
         }
 
@@ -83,19 +85,22 @@ public class Main {
          * @param consumer The consumer to apply to each item.
          * @return The remaining buffer.
          */
-        protected byte[] parseArray(byte[] buffer, ArrayItemConsumer consumer) {
+        protected byte[] _parse_array(byte[] buffer, ArrayItemConsumer consumer) {
             int arrLength = (buffer[0] & 0xFF) - 1;
             byte[] arrBuffer = new byte[buffer.length - 1];
             System.arraycopy(buffer, 1, arrBuffer, 0, buffer.length - 1);
+
             for (int i = 0; i < arrLength; i++) {
                 int itemLength = arrBuffer[0] & 0xFF;
                 byte[] itemBuffer = new byte[itemLength - 1];
                 System.arraycopy(arrBuffer, 1, itemBuffer, 0, itemLength - 1);
                 consumer.consume(itemBuffer);
+
                 byte[] newArrBuffer = new byte[arrBuffer.length - itemLength - 1];
                 System.arraycopy(arrBuffer, itemLength + 1, newArrBuffer, 0, arrBuffer.length - itemLength - 1);
                 arrBuffer = newArrBuffer;
             }
+
             return arrBuffer;
         }
     }
@@ -126,9 +131,9 @@ public class Main {
     static class KafkaHeader extends BaseKafka {
         public final byte[] length;
         public final byte[] key;
-        public final int keyInt;
+        public final int key_int;
         public final byte[] version;
-        public final int versionInt;
+        public final int version_int;
         public final byte[] id;
         public final String client;
         public final byte[] body;
@@ -139,11 +144,11 @@ public class Main {
 
             this.key = new byte[2];
             System.arraycopy(data, 4, this.key, 0, 2);
-            this.keyInt = ByteBuffer.wrap(this.key).order(ByteOrder.BIG_ENDIAN).getShort() & 0xFFFF;
+            this.key_int = ByteBuffer.wrap(this.key).order(ByteOrder.BIG_ENDIAN).getShort() & 0xFFFF;
 
             this.version = new byte[2];
             System.arraycopy(data, 6, this.version, 0, 2);
-            this.versionInt = ByteBuffer.wrap(this.version).order(ByteOrder.BIG_ENDIAN).getShort() & 0xFFFF;
+            this.version_int = ByteBuffer.wrap(this.version).order(ByteOrder.BIG_ENDIAN).getShort() & 0xFFFF;
 
             this.id = new byte[4];
             System.arraycopy(data, 8, this.id, 0, 4);
@@ -151,10 +156,10 @@ public class Main {
             byte[] clientBuffer = new byte[data.length - 12];
             System.arraycopy(data, 12, clientBuffer, 0, data.length - 12);
 
-            StringParseResult clientResult = parseString(clientBuffer);
+            StringParseResult clientResult = _parse_string(clientBuffer);
             this.client = clientResult.value;
 
-            this.body = removeTagBuffer(clientResult.remaining);
+            this.body = _remove_tag_buffer(clientResult.remaining);
         }
     }
 
@@ -162,24 +167,24 @@ public class Main {
      * API request class.
      */
     static class ApiRequest extends BaseKafka {
-        private final int versionIt;
+        private final int version_int;
         private final byte[] id;
         public final byte[] message;
 
-        public ApiRequest(int versionIt, byte[] id) {
-            this.versionIt = versionIt;
+        public ApiRequest(int version_int, byte[] id) {
+            this.version_int = version_int;
             this.id = id;
-            this.message = createMessage(constructMessage());
+            this.message = _create_message(construct_message());
         }
 
-        private byte[] constructMessage() {
+        private byte[] construct_message() {
             ByteArrayOutputStream body = new ByteArrayOutputStream();
             try {
                 // Add correlation ID
                 body.write(id);
 
                 // Add error code
-                body.write(errorHandler());
+                body.write(error_handler());
 
                 // Add API keys array
                 body.write(3); // Array length (compact format, 3-1=2 elements)
@@ -207,8 +212,8 @@ public class Main {
             }
         }
 
-        private byte[] errorHandler() {
-            if (0 <= versionIt && versionIt <= 4) {
+        private byte[] error_handler() {
+            if (0 <= version_int && version_int <= 4) {
                 return ERRORS.get("ok");
             } else {
                 return ERRORS.get("error");
@@ -224,7 +229,7 @@ public class Main {
         private final byte[] body;
         private final List<String> topics = new ArrayList<>();
         private final byte[] cursor;
-        private final Map<String, Map<String, Object>> availableTopics;
+        private final Map<String, Map<String, Object>> available_topics;
         private final Map<byte[], Map<String, Object>> partitions;
         public final byte[] message;
 
@@ -233,85 +238,93 @@ public class Main {
             this.body = body;
 
             // Parse topics array
-            byte[] buffer = parseArray(body, this::parseTopics);
+            byte[] buffer = _parse_array(body, this::parse_topics);
 
             // Extract cursor
             this.cursor = new byte[1];
             System.arraycopy(buffer, 0, this.cursor, 0, 1);
 
             // Remove tag buffer
-            buffer = removeTagBuffer(buffer);
+            buffer = _remove_tag_buffer(buffer);
 
             // Get metadata
-            this.availableTopics = metadata.getTopics();
+            this.available_topics = metadata.getTopics();
             this.partitions = metadata.getPartitions();
 
             // Create message
-            this.message = createMessage(constructMessage());
+            this.message = _create_message(construct_message());
         }
 
-        private void parseTopics(byte[] itemBuffer) {
-            topics.add(new String(itemBuffer, StandardCharsets.UTF_8));
+        private void parse_topics(byte[] item_buffer) {
+            topics.add(new String(item_buffer, StandardCharsets.UTF_8));
         }
 
-        private byte[] createTopicItem(byte[] topic) {
+        private byte[] create_topic_item(byte[] topic) {
             String topicStr = new String(topic, StandardCharsets.UTF_8);
-            boolean available = availableTopics.containsKey(topicStr);
+            boolean available = available_topics.containsKey(topicStr);
 
-            ByteArrayOutputStream topicBuffer = new ByteArrayOutputStream();
+            ByteArrayOutputStream topic_buffer = new ByteArrayOutputStream();
             try {
                 // Error code
                 if (available) {
-                    topicBuffer.write(ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 0).array());
+                    topic_buffer.write(ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 0).array());
                 } else {
-                    topicBuffer.write(ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 3).array());
+                    topic_buffer.write(ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 3).array());
                 }
 
                 // Topic name
-                topicBuffer.write(topic.length + 1); // Compact string length
-                topicBuffer.write(topic);
+                topic_buffer.write(topic.length + 1); // Compact string length
+                topic_buffer.write(topic);
 
                 // Topic ID (UUID)
                 if (available) {
-                    Map<String, Object> topicInfo = availableTopics.get(topicStr);
+                    Map<String, Object> topicInfo = available_topics.get(topicStr);
                     UUID uuid = (UUID) topicInfo.get("uuid");
+
                     ByteBuffer uuidBuffer = ByteBuffer.allocate(16);
                     uuidBuffer.putLong(uuid.getMostSignificantBits());
                     uuidBuffer.putLong(uuid.getLeastSignificantBits());
-                    topicBuffer.write(uuidBuffer.array());
+                    topic_buffer.write(uuidBuffer.array());
                 } else {
-                    topicBuffer.write(new byte[16]); // Zeroed UUID
+                    topic_buffer.write(new byte[16]); // Zeroed UUID
                 }
+
                 // Is internal flag
-                topicBuffer.write(0);
+                topic_buffer.write(0);
+
                 // Partitions array
                 if (available) {
-                    Map<String, Object> topicInfo = availableTopics.get(topicStr);
+                    Map<String, Object> topicInfo = available_topics.get(topicStr);
                     @SuppressWarnings("unchecked")
                     List<byte[]> topicPartitions = (List<byte[]>) topicInfo.get("partitions");
+
                     if (topicPartitions != null && !topicPartitions.isEmpty()) {
-                        topicBuffer.write(topicPartitions.size() + 1); // Compact array length
+                        topic_buffer.write(topicPartitions.size() + 1); // Compact array length
+
                         for (byte[] partitionId : topicPartitions) {
-                            topicBuffer.write(addPartition(partitions.get(partitionId)));
+                            topic_buffer.write(add_partition(partitions.get(partitionId)));
                         }
                     } else {
-                        topicBuffer.write(1); // Empty array
+                        topic_buffer.write(1); // Empty array
                     }
                 } else {
-                    topicBuffer.write(1); // Empty array
+                    topic_buffer.write(1); // Empty array
                 }
+
                 // Topic authorized operations
-                topicBuffer.write(ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN).putInt(0x00000DF8).array());
+                topic_buffer.write(ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN).putInt(0x00000DF8).array());
+
                 // Tag buffer
-                topicBuffer.write(0);
-                return topicBuffer.toByteArray();
+                topic_buffer.write(0);
+
+                return topic_buffer.toByteArray();
             } catch (IOException e) {
                 e.printStackTrace();
                 return new byte[0];
             }
         }
 
-        private byte[] addPartition(Map<String, Object> partition) {
+        private byte[] add_partition(Map<String, Object> partition) {
             ByteArrayOutputStream ret = new ByteArrayOutputStream();
             try {
                 // Error code
@@ -343,7 +356,7 @@ public class Main {
             }
         }
 
-        private byte[] constructMessage() {
+        private byte[] construct_message() {
             ByteArrayOutputStream message = new ByteArrayOutputStream();
             try {
                 // Header
@@ -358,7 +371,7 @@ public class Main {
 
                 // Add topic information
                 if (!topics.isEmpty()) {
-                    message.write(createTopicItem(topics.get(0).getBytes(StandardCharsets.UTF_8)));
+                    message.write(create_topic_item(topics.get(0).getBytes(StandardCharsets.UTF_8)));
                 }
 
                 // Add cursor (null cursor)
@@ -384,7 +397,7 @@ public class Main {
         private final List<String> topics = new ArrayList<>();
         private final byte[] limit;
         private final byte[] cursor;
-        private final Map<String, Map<String, Object>> availableTopics;
+        private final Map<String, Map<String, Object>> available_topics;
         private final Map<byte[], Map<String, Object>> partitions;
         public final byte[] message;
 
@@ -393,7 +406,7 @@ public class Main {
             this.body = body;
 
             // Parse topics array
-            byte[] buffer = parseArray(body, this::parseTopics);
+            byte[] buffer = _parse_array(body, this::parse_topics);
 
             // Extract limit and cursor
             this.limit = new byte[4];
@@ -403,86 +416,86 @@ public class Main {
             System.arraycopy(buffer, 4, this.cursor, 0, 1);
 
             // Remove tag buffer
-            buffer = removeTagBuffer(buffer);
+            buffer = _remove_tag_buffer(buffer);
 
             // Get metadata
-            this.availableTopics = metadata.getTopics();
+            this.available_topics = metadata.getTopics();
             this.partitions = metadata.getPartitions();
 
             // Create message
-            this.message = createMessage(constructMessage());
+            this.message = _create_message(construct_message());
         }
 
-        private void parseTopics(byte[] itemBuffer) {
-            topics.add(new String(itemBuffer, StandardCharsets.UTF_8));
+        private void parse_topics(byte[] item_buffer) {
+            topics.add(new String(item_buffer, StandardCharsets.UTF_8));
         }
 
-        private byte[] createTopicItem(byte[] topic) {
+        private byte[] create_topic_item(byte[] topic) {
             String topicStr = new String(topic, StandardCharsets.UTF_8);
-            boolean available = availableTopics.containsKey(topicStr);
+            boolean available = available_topics.containsKey(topicStr);
 
-            ByteArrayOutputStream topicBuffer = new ByteArrayOutputStream();
+            ByteArrayOutputStream topic_buffer = new ByteArrayOutputStream();
             try {
                 // Error code
                 if (available) {
-                    topicBuffer.write(ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 0).array());
+                    topic_buffer.write(ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 0).array());
                 } else {
-                    topicBuffer.write(ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 3).array());
+                    topic_buffer.write(ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 3).array());
                 }
 
                 // Topic name
-                topicBuffer.write(topic.length + 1); // Compact string length
-                topicBuffer.write(topic);
+                topic_buffer.write(topic.length + 1); // Compact string length
+                topic_buffer.write(topic);
 
                 // Topic ID (UUID)
                 if (available) {
-                    Map<String, Object> topicInfo = availableTopics.get(topicStr);
+                    Map<String, Object> topicInfo = available_topics.get(topicStr);
                     UUID uuid = (UUID) topicInfo.get("uuid");
 
                     ByteBuffer uuidBuffer = ByteBuffer.allocate(16);
                     uuidBuffer.putLong(uuid.getMostSignificantBits());
                     uuidBuffer.putLong(uuid.getLeastSignificantBits());
-                    topicBuffer.write(uuidBuffer.array());
+                    topic_buffer.write(uuidBuffer.array());
                 } else {
-                    topicBuffer.write(new byte[16]); // Zeroed UUID
+                    topic_buffer.write(new byte[16]); // Zeroed UUID
                 }
 
                 // Is internal flag
-                topicBuffer.write(0);
+                topic_buffer.write(0);
 
                 // Partitions array
                 if (available) {
-                    Map<String, Object> topicInfo = availableTopics.get(topicStr);
+                    Map<String, Object> topicInfo = available_topics.get(topicStr);
                     @SuppressWarnings("unchecked")
                     List<byte[]> topicPartitions = (List<byte[]>) topicInfo.get("partitions");
 
                     if (topicPartitions != null && !topicPartitions.isEmpty()) {
-                        topicBuffer.write(topicPartitions.size() + 1); // Compact array length
+                        topic_buffer.write(topicPartitions.size() + 1); // Compact array length
 
                         for (byte[] partitionId : topicPartitions) {
-                            topicBuffer.write(addPartition(partitions.get(partitionId)));
+                            topic_buffer.write(add_partition(partitions.get(partitionId)));
                         }
                     } else {
-                        topicBuffer.write(1); // Empty array
+                        topic_buffer.write(1); // Empty array
                     }
                 } else {
-                    topicBuffer.write(1); // Empty array
+                    topic_buffer.write(1); // Empty array
                 }
 
                 // Topic authorized operations
-                topicBuffer.write(ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN).putInt(0x00000DF8).array());
+                topic_buffer.write(ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN).putInt(0x00000DF8).array());
 
                 // Tag buffer
-                topicBuffer.write(0);
+                topic_buffer.write(0);
 
-                return topicBuffer.toByteArray();
+                return topic_buffer.toByteArray();
             } catch (IOException e) {
                 e.printStackTrace();
                 return new byte[0];
             }
         }
 
-        private byte[] addPartition(Map<String, Object> partition) {
+        private byte[] add_partition(Map<String, Object> partition) {
             ByteArrayOutputStream ret = new ByteArrayOutputStream();
             try {
                 // Error code
@@ -515,7 +528,7 @@ public class Main {
             }
         }
 
-        private byte[] constructMessage() {
+        private byte[] construct_message() {
             ByteArrayOutputStream message = new ByteArrayOutputStream();
             try {
                 // Header
@@ -530,7 +543,7 @@ public class Main {
 
                 // Add topic information
                 if (!topics.isEmpty()) {
-                    message.write(createTopicItem(topics.get(0).getBytes(StandardCharsets.UTF_8)));
+                    message.write(create_topic_item(topics.get(0).getBytes(StandardCharsets.UTF_8)));
                 }
 
                 // Add cursor
@@ -573,9 +586,9 @@ public class Main {
 
                     // Process based on API key
                     byte[] message;
-                    if (header.keyIt == 18) { // ApiVersions
-                        message = new ApiRequest(header.versionIt, header.id).message;
-                    } else if (header.keyIt == 75) { // DescribeTopicPartitions
+                    if (header.key_int == 18) { // ApiVersions
+                        message = new ApiRequest(header.version_int, header.id).message;
+                    } else if (header.key_int == 75) { // DescribeTopicPartitions
                         message = new DescribeTopicPartitionsRequest(header.id, header.body, metadata).message;
                     } else { // Default to TopicRequest
                         message = new TopicRequest(header.id, header.body, metadata).message;
@@ -602,15 +615,19 @@ public class Main {
      */
     public static void main(String[] args) {
         System.out.println("Logs from your program will appear here!");
+
         try {
             // Read metadata
             byte[] data = Files.readAllBytes(Paths.get(METADATA_LOG_PATH));
             Metadata metadata = new Metadata(data);
             System.out.println(metadata.getTopics());
+
             // Start server
             ServerSocket serverSocket = new ServerSocket(9092);
             System.out.println("Server listening...");
+
             ExecutorService executor = Executors.newCachedThreadPool();
+
             while (true) {
                 Socket clientSocket = serverSocket.accept();
                 executor.submit(new ClientHandler(clientSocket, metadata));
@@ -620,4 +637,3 @@ public class Main {
             e.printStackTrace();
         }
     }
-}
