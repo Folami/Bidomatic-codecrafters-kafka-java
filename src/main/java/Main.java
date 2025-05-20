@@ -535,8 +535,9 @@ public class Main {
         }
     }
 
-    public static void runServer(Metadata metadata) throws IOException {
-        ServerSocket serverSocket = new ServerSocket(9092);
+    public static void runServer(Metadata metadata, int port) throws IOException {
+        ServerSocket serverSocket = new ServerSocket(port);
+        serverSocket.setReuseAddress(true);
         System.out.println("Server listening...");
         ExecutorService executor = Executors.newCachedThreadPool();
         while (true) {
@@ -549,6 +550,7 @@ public class Main {
      * Main method.
      */
     public static void main(String[] args) {
+        int port = 9092;
         System.out.println("Logs from your program will appear here!");
         try {
             // Read metadata
@@ -556,7 +558,7 @@ public class Main {
             Metadata metadata = new Metadata(data);
             System.out.println(metadata.getTopics());
             // Start server
-            runServer(metadata);
+            runServer(metadata, port);
         } catch (IOException e) {
             System.err.println("Error: " + e.getMessage());
             e.printStackTrace();
