@@ -2,6 +2,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.ByteBuffer;
@@ -136,24 +137,18 @@ public class Main {
         public KafkaHeader(byte[] data) {
             this.length = new byte[4];
             System.arraycopy(data, 0, this.length, 0, 4);
-
             this.key = new byte[2];
             System.arraycopy(data, 4, this.key, 0, 2);
             this.keyInt = ByteBuffer.wrap(this.key).order(ByteOrder.BIG_ENDIAN).getShort() & 0xFFFF;
-
             this.version = new byte[2];
             System.arraycopy(data, 6, this.version, 0, 2);
             this.versionInt = ByteBuffer.wrap(this.version).order(ByteOrder.BIG_ENDIAN).getShort() & 0xFFFF;
-
             this.id = new byte[4];
             System.arraycopy(data, 8, this.id, 0, 4);
-
             byte[] clientBuffer = new byte[data.length - 12];
             System.arraycopy(data, 12, clientBuffer, 0, data.length - 12);
-
             StringParseResult clientResult = parseString(clientBuffer);
             this.client = clientResult.value;
-
             this.body = removeTagBuffer(clientResult.remaining);
         }
     }
@@ -177,29 +172,23 @@ public class Main {
             try {
                 // Add correlation ID
                 body.write(id);
-
                 // Add error code
                 body.write(errorHandler());
-
                 // Add API keys array
                 body.write(3); // Array length (compact format, 3-1=2 elements)
-
                 // ApiVersions entry (key 18)
                 body.write(ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 18).array());
                 body.write(ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 0).array());
                 body.write(ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 4).array());
                 body.write(0); // Tagged fields
-
                 // DescribeTopicPartitions entry (key 75)
                 body.write(ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 75).array());
                 body.write(ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 0).array());
                 body.write(ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 0).array());
                 body.write(0); // Tagged fields
-
                 // Add throttle time and tag buffer
                 body.write(ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN).putInt(0).array());
                 body.write(0); // Tag buffer
-
                 return body.toByteArray();
             } catch (IOException e) {
                 e.printStackTrace();
@@ -231,21 +220,16 @@ public class Main {
         public DescribeTopicPartitionsRequest(byte[] id, byte[] body, Metadata metadata) {
             this.id = id;
             this.body = body;
-
             // Parse topics array
             byte[] buffer = parseArray(body, this::parseTopics);
-
             // Extract cursor
             this.cursor = new byte[1];
             System.arraycopy(buffer, 0, this.cursor, 0, 1);
-
             // Remove tag buffer
             buffer = removeTagBuffer(buffer);
-
             // Get metadata
             this.availableTopics = metadata.getTopics();
             this.partitions = metadata.getPartitions();
-
             // Create message
             this.message = createMessage(constructMessage());
         }
@@ -257,7 +241,6 @@ public class Main {
         private byte[] createTopicItem(byte[] topic) {
             String topicStr = new String(topic, StandardCharsets.UTF_8);
             boolean available = availableTopics.containsKey(topicStr);
-
             ByteArrayOutputStream topicBuffer = new ByteArrayOutputStream();
             try {
                 // Error code
@@ -266,11 +249,9 @@ public class Main {
                 } else {
                     topicBuffer.write(ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 3).array());
                 }
-
                 // Topic name
                 topicBuffer.write(topic.length + 1); // Compact string length
                 topicBuffer.write(topic);
-
                 // Topic ID (UUID)
                 if (available) {
                     Map<String, Object> topicInfo = availableTopics.get(topicStr);
@@ -316,26 +297,20 @@ public class Main {
             try {
                 // Error code
                 ret.write(ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 0).array());
-
                 // Partition index
                 ret.write((byte[]) partition.get("id"));
-
                 // Leader
                 ret.write((byte[]) partition.get("leader"));
-
                 // Leader epoch
                 ret.write((byte[]) partition.get("leader_epoch"));
-
                 // Empty arrays
                 ret.write(1); // replica_nodes
                 ret.write(1); // isr_nodes
                 ret.write(1); // eligible_leader_replicas
                 ret.write(1); // last_known_elr
                 ret.write(1); // offline_replicas
-
                 // Tagged fields
                 ret.write(0);
-
                 return ret.toByteArray();
             } catch (IOException e) {
                 e.printStackTrace();
@@ -349,24 +324,18 @@ public class Main {
                 // Header
                 message.write(id);
                 message.write(TAG_BUFFER);
-
                 // Response body
                 message.write(DEFAULT_THROTTLE_TIME);
-
                 // Topics array
                 message.write(topics.size() + 1); // Compact array length
-
                 // Add topic information
                 if (!topics.isEmpty()) {
                     message.write(createTopicItem(topics.get(0).getBytes(StandardCharsets.UTF_8)));
                 }
-
                 // Add cursor (null cursor)
                 message.write(0xFF);
-
                 // Tagged fields
                 message.write(TAG_BUFFER);
-
                 return message.toByteArray();
             } catch (IOException e) {
                 e.printStackTrace();
@@ -391,24 +360,15 @@ public class Main {
         public TopicRequest(byte[] id, byte[] body, Metadata metadata) {
             this.id = id;
             this.body = body;
-
             // Parse topics array
             byte[] buffer = parseArray(body, this::parseTopics);
-
             // Extract limit and cursor
             this.limit = new byte[4];
             System.arraycopy(buffer, 0, this.limit, 0, 4);
-
             this.cursor = new byte[1];
             System.arraycopy(buffer, 4, this.cursor, 0, 1);
-
-            // Remove tag buffer
-            buffer = removeTagBuffer(buffer);
-
             // Get metadata
             this.availableTopics = metadata.getTopics();
-            this.partitions = metadata.getPartitions();
-
             // Create message
             this.message = createMessage(constructMessage());
         }
@@ -420,7 +380,6 @@ public class Main {
         private byte[] createTopicItem(byte[] topic) {
             String topicStr = new String(topic, StandardCharsets.UTF_8);
             boolean available = availableTopics.containsKey(topicStr);
-
             ByteArrayOutputStream topicBuffer = new ByteArrayOutputStream();
             try {
                 // Error code
@@ -429,16 +388,13 @@ public class Main {
                 } else {
                     topicBuffer.write(ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 3).array());
                 }
-
                 // Topic name
                 topicBuffer.write(topic.length + 1); // Compact string length
                 topicBuffer.write(topic);
-
                 // Topic ID (UUID)
                 if (available) {
                     Map<String, Object> topicInfo = availableTopics.get(topicStr);
                     UUID uuid = (UUID) topicInfo.get("uuid");
-
                     ByteBuffer uuidBuffer = ByteBuffer.allocate(16);
                     uuidBuffer.putLong(uuid.getMostSignificantBits());
                     uuidBuffer.putLong(uuid.getLeastSignificantBits());
@@ -446,19 +402,15 @@ public class Main {
                 } else {
                     topicBuffer.write(new byte[16]); // Zeroed UUID
                 }
-
                 // Is internal flag
                 topicBuffer.write(0);
-
                 // Partitions array
                 if (available) {
                     Map<String, Object> topicInfo = availableTopics.get(topicStr);
                     @SuppressWarnings("unchecked")
                     List<byte[]> topicPartitions = (List<byte[]>) topicInfo.get("partitions");
-
                     if (topicPartitions != null && !topicPartitions.isEmpty()) {
                         topicBuffer.write(topicPartitions.size() + 1); // Compact array length
-
                         for (byte[] partitionId : topicPartitions) {
                             topicBuffer.write(addPartition(partitions.get(partitionId)));
                         }
@@ -468,13 +420,10 @@ public class Main {
                 } else {
                     topicBuffer.write(1); // Empty array
                 }
-
                 // Topic authorized operations
                 topicBuffer.write(ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN).putInt(0x00000DF8).array());
-
                 // Tag buffer
                 topicBuffer.write(0);
-
                 return topicBuffer.toByteArray();
             } catch (IOException e) {
                 e.printStackTrace();
@@ -487,19 +436,15 @@ public class Main {
             try {
                 // Error code
                 ret.write(ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 0).array());
-
                 // Partition index
                 byte[] id = (byte[]) partition.get("id");
                 ret.write(ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN).putInt(ByteBuffer.wrap(id).getInt()).array());
-
                 // Leader
                 byte[] leader = (byte[]) partition.get("leader");
                 ret.write(ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN).putInt(ByteBuffer.wrap(leader).getInt()).array());
-
                 // Leader epoch
                 byte[] leaderEpoch = (byte[]) partition.get("leader_epoch");
                 ret.write(ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN).putInt(ByteBuffer.wrap(leaderEpoch).getInt()).array());
-
                 // Empty arrays
                 ret.write(0);
                 ret.write(0);
@@ -507,7 +452,6 @@ public class Main {
                 ret.write(0);
                 ret.write(0);
                 ret.write(0);
-
                 return ret.toByteArray();
             } catch (IOException e) {
                 e.printStackTrace();
@@ -521,24 +465,18 @@ public class Main {
                 // Header
                 message.write(id);
                 message.write(TAG_BUFFER);
-
                 // Add throttle time
                 message.write(DEFAULT_THROTTLE_TIME);
-
                 // Topics array
                 message.write(topics.size() + 1); // Compact array length
-
                 // Add topic information
                 if (!topics.isEmpty()) {
                     message.write(createTopicItem(topics.get(0).getBytes(StandardCharsets.UTF_8)));
                 }
-
                 // Add cursor
                 message.write(0xFF);
-
                 // Tagged fields
                 message.write(0);
-
                 return message.toByteArray();
             } catch (IOException e) {
                 e.printStackTrace();
@@ -563,24 +501,23 @@ public class Main {
         public void run() {
             try (InputStream in = clientSocket.getInputStream();
                  OutputStream out = clientSocket.getOutputStream()) {
-
                 byte[] buffer = new byte[1024];
                 int bytesRead;
-
                 while ((bytesRead = in.read(buffer)) != -1) {
                     // Parse the request
                     KafkaHeader header = new KafkaHeader(buffer);
-
                     // Process based on API key
                     byte[] message;
                     if (header.keyInt == 18) { // ApiVersions
-                        message = new ApiRequest(header.versionInt, header.id).message;
+                        BaseKafka request = new ApiRequest(header.versionInt, header.id);
+                        message = request.message;
                     } else if (header.keyInt == 75) { // DescribeTopicPartitions
-                        message = new DescribeTopicPartitionsRequest(header.id, header.body, metadata).message;
+                        BaseKafka request = new DescribeTopicPartitionsRequest(header.id, header.body, metadata);
+                        message = request.message;
                     } else { // Default to TopicRequest
-                        message = new TopicRequest(header.id, header.body, metadata).message;
+                        BaseKafka request = new TopicRequest(header.id, header.body, metadata);
+                        message = request.message;
                     }
-
                     // Send response
                     out.write(message);
                     out.flush();
@@ -597,6 +534,16 @@ public class Main {
         }
     }
 
+    public static void runServer(Metadata metadata) throws IOException {
+        ServerSocket serverSocket = new ServerSocket(9092);
+        System.out.println("Server listening...");
+        ExecutorService executor = Executors.newCachedThreadPool();
+        while (true) {
+            Socket clientSocket = serverSocket.accept();
+            executor.submit(new ClientHandler(clientSocket, metadata));
+        }
+    }
+
     /**
      * Main method.
      */
@@ -608,13 +555,7 @@ public class Main {
             Metadata metadata = new Metadata(data);
             System.out.println(metadata.getTopics());
             // Start server
-            ServerSocket serverSocket = new ServerSocket(9092);
-            System.out.println("Server listening...");
-            ExecutorService executor = Executors.newCachedThreadPool();
-            while (true) {
-                Socket clientSocket = serverSocket.accept();
-                executor.submit(new ClientHandler(clientSocket, metadata));
-            }
+            runServer(metadata);
         } catch (IOException e) {
             System.err.println("Error: " + e.getMessage());
             e.printStackTrace();
