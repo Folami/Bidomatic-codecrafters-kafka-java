@@ -162,12 +162,12 @@ public class Main {
      * API request class.
      */
     static class ApiRequest extends BaseKafka {
-        private final int versionIt;
+        private final int versionInt;
         private final byte[] id;
         public final byte[] message;
 
-        public ApiRequest(int versionIt, byte[] id) {
-            this.versionIt = versionIt;
+        public ApiRequest(int versionInt, byte[] id) {
+            this.versionInt = versionInt;
             this.id = id;
             this.message = createMessage(constructMessage());
         }
@@ -208,7 +208,7 @@ public class Main {
         }
 
         private byte[] errorHandler() {
-            if (0 <= versionIt && versionIt <= 4) {
+            if (0 <= versionInt && versionInt <= 4) {
                 return ERRORS.get("ok");
             } else {
                 return ERRORS.get("error");
@@ -573,9 +573,9 @@ public class Main {
 
                     // Process based on API key
                     byte[] message;
-                    if (header.keyIt == 18) { // ApiVersions
-                        message = new ApiRequest(header.versionIt, header.id).message;
-                    } else if (header.keyIt == 75) { // DescribeTopicPartitions
+                    if (header.keyInt == 18) { // ApiVersions
+                        message = new ApiRequest(header.versionInt, header.id).message;
+                    } else if (header.keyInt == 75) { // DescribeTopicPartitions
                         message = new DescribeTopicPartitionsRequest(header.id, header.body, metadata).message;
                     } else { // Default to TopicRequest
                         message = new TopicRequest(header.id, header.body, metadata).message;
