@@ -509,13 +509,13 @@ public class Main {
                     // Process based on API key
                     byte[] message;
                     if (header.keyInt == 18) { // ApiVersions
-                        BaseKafka request = new ApiRequest(header.versionInt, header.id);
+                        ApiRequest request = new ApiRequest(header.versionInt, header.id);
                         message = request.message;
                     } else if (header.keyInt == 75) { // DescribeTopicPartitions
-                        BaseKafka request = new DescribeTopicPartitionsRequest(header.id, header.body, metadata);
+                        DescribeTopicPartitionsRequest request = new DescribeTopicPartitionsRequest(header.id, header.body, metadata);
                         message = request.message;
                     } else { // Default to TopicRequest
-                        BaseKafka request = new TopicRequest(header.id, header.body, metadata);
+                        TopicRequest request = new TopicRequest(header.id, header.body, metadata);
                         message = request.message;
                     }
                     // Send response
