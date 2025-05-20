@@ -369,6 +369,7 @@ public class Main {
             System.arraycopy(buffer, 4, this.cursor, 0, 1);
             // Get metadata
             this.availableTopics = metadata.getTopics();
+            this.partitions = metadata.getPartitions(); // Initialize partitions here
             // Create message
             this.message = createMessage(constructMessage());
         }
