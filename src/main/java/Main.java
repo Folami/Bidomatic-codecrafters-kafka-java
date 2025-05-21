@@ -29,7 +29,6 @@ public class Main {
     private static final byte[] TAG_BUFFER = new byte[]{0};
     private static final byte[] DEFAULT_THROTTLE_TIME = new byte[]{0, 0, 0, 0};
     private static final Map<String, byte[]> ERRORS = new HashMap<>();
-
     static {
         ERRORS.put("ok", new byte[]{0, 0});
         ERRORS.put("error", new byte[]{0, 35});
@@ -98,45 +97,42 @@ public class Main {
          * @return The remaining buffer.
          */
         protected byte[] parseArray(byte[] buffer, ArrayItemConsumer consumer) {
-            if (buffer == null || buffer.length == 0) {
-                System.err.println("ParseArray: Input buffer is null or empty.");
+            if (buffer == null || buffer.length < 1) { // Need at least 1 byte for array length
+                System.err.println("BaseKafka.parseArray: Input buffer is null or too short for array length.");
                 return new byte[0];
             }
-
             int arrayCompactLength = buffer[0] & 0xFF;
             int numberOfElements = arrayCompactLength - 1;
-
-            if (numberOfElements < 0) {
-                System.err.println("ParseArray: Invalid compact array length byte: " + arrayCompactLength);
-                return copyOfRange(buffer, 1, buffer.length); // Skip the array length byte and continue
-            }
-
             int currentOffset = 1; // Start after the array compact length byte
-
+            if (numberOfElements < 0) {
+                System.err.println("BaseKafka.parseArray: Invalid number of elements (" + numberOfElements + ") from compact_length_byte " + arrayCompactLength);
+                // Return buffer after consuming the invalid length byte
+                return copyOfRange(buffer, currentOffset, buffer.length);
+            }
             for (int i = 0; i < numberOfElements; i++) {
+                // Check if there's enough space for the item's compact length byte
                 if (currentOffset >= buffer.length) {
-                    System.err.println("ParseArray: Buffer too short for item " + i + " length byte.");
+                    System.err.println("BaseKafka.parseArray: Buffer too short for item " + i + "'s compact length byte.");
                     break;
                 }
-
-                int itemCompactLengthByteValue = buffer[currentOffset] & 0xFF;
-                int itemActualStringLength = itemCompactLengthByteValue - 1;
-                currentOffset++; // Move past item's compact length byte
-
+                int itemCompactLength = buffer[currentOffset] & 0xFF; // This is the L byte value (actual_length + 1)
+                int itemActualStringLength = itemCompactLength - 1;
                 if (itemActualStringLength < 0) {
-                    System.err.println("ParseArray: Invalid item string length: " + itemActualStringLength + " from compact byte " + itemCompactLengthByteValue);
-                    // Skip this item, but still move offset by 0 (no string bytes)
-                    continue;
+                    System.err.println("BaseKafka.parseArray: Invalid actual string length (" + itemActualStringLength + ") for item " + i + " from compact_length " + itemCompactLength);
+                    // Advance offset by itemCompactLength + 1 to skip this malformed item and the extra byte
+                    currentOffset += (itemCompactLength + 1); // This might be problematic if itemCompactLength is large and invalid
+                    continue; // Or break, depending on desired error handling
                 }
-
-                if (currentOffset + itemActualStringLength > buffer.length) {
-                    System.err.println("ParseArray: Buffer too short for item " + i + " content. Needed: " + itemActualStringLength + ", available: " + (buffer.length - currentOffset));
+                // Check if there's enough space for the item's content (string + compact_length_byte + 1 extra byte)
+                if (currentOffset + itemCompactLength + 1 > buffer.length) {
+                    System.err.println("BaseKafka.parseArray: Buffer too short for item " + i + " content and extra byte. Needed: " + (itemCompactLength + 1) + " from offset " + currentOffset + ", available: " + (buffer.length - currentOffset));
                     break;
                 }
-
-                byte[] itemData = copyOfRange(buffer, currentOffset, currentOffset + itemActualStringLength);
+                // Extract the string: starts 1 byte after itemCompactLength byte, for itemActualStringLength bytes
+                byte[] itemData = copyOfRange(buffer, currentOffset + 1, currentOffset + 1 + itemActualStringLength);
                 consumer.consume(itemData);
-                currentOffset += itemActualStringLength;
+                // Advance offset by itemCompactLength (which includes its own byte and string bytes) + 1 (for the extra byte)
+                currentOffset += (itemCompactLength + 1);
             }
             return copyOfRange(buffer, currentOffset, buffer.length);
         }
@@ -283,7 +279,7 @@ public class Main {
                     topicBuffer.write(ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 3).array());
                 }
                 // Topic name
-                topicBuffer.write(topic.length + 1); // Compact string length
+                topicBuffer.write((byte) (topic.length + 1)); // Compact string length
                 topicBuffer.write(topic);
                 // Topic ID (UUID)
                 if (available) {
@@ -304,20 +300,20 @@ public class Main {
                     @SuppressWarnings("unchecked")
                     List<byte[]> topicPartitions = (List<byte[]>) topicInfo.get("partitions");
                     if (topicPartitions != null && !topicPartitions.isEmpty()) {
-                        topicBuffer.write(topicPartitions.size() + 1); // Compact array length
+                        topicBuffer.write((byte) (topicPartitions.size() + 1)); // Compact array length
                         for (byte[] partitionId : topicPartitions) {
                             topicBuffer.write(addPartition(partitions.get(partitionId)));
                         }
                     } else {
-                        topicBuffer.write(1); // Empty array
+                        topicBuffer.write((byte) 1); // Empty array
                     }
                 } else {
-                    topicBuffer.write(1); // Empty array
+                    topicBuffer.write((byte) 1); // Empty array
                 }
                 // Topic authorized operations
                 topicBuffer.write(ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN).putInt(0x00000DF8).array());
                 // Tag buffer
-                topicBuffer.write(0);
+                topicBuffer.write((byte) 0);
                 return topicBuffer.toByteArray();
             } catch (IOException e) {
                 e.printStackTrace();
@@ -337,13 +333,13 @@ public class Main {
                 // Leader epoch
                 ret.write((byte[]) partition.get("leader_epoch"));
                 // Empty arrays
-                ret.write(1); // replica_nodes
-                ret.write(1); // isr_nodes
-                ret.write(1); // eligible_leader_replicas
-                ret.write(1); // last_known_elr
-                ret.write(1); // offline_replicas
+                ret.write((byte) 1); // replica_nodes
+                ret.write((byte) 1); // isr_nodes
+                ret.write((byte) 1); // eligible_leader_replicas (mimicking python output which includes these for v0)
+                ret.write((byte) 1); // last_known_elr (mimicking python output)
+                ret.write((byte) 1); // offline_replicas
                 // Tagged fields
-                ret.write(0);
+                ret.write((byte) 0);
                 return ret.toByteArray();
             } catch (IOException e) {
                 e.printStackTrace();
@@ -360,13 +356,13 @@ public class Main {
                 // Response body
                 message.write(DEFAULT_THROTTLE_TIME);
                 // Topics array
-                message.write(topics.size() + 1); // Compact array length
+                message.write((byte) (topics.size() + 1)); // Compact array length
                 // Add all topic information
                 for (String topic : topics) {
                     message.write(createTopicItem(topic.getBytes(StandardCharsets.UTF_8)));
                 }
                 // Add cursor (null cursor)
-                message.write(0xFF);
+                message.write((byte) 0xFF);
                 // Tagged fields
                 message.write(TAG_BUFFER);
                 return message.toByteArray();
