@@ -131,7 +131,7 @@ public class Main {
                     System.err.println("ParseArray: Invalid item string length: " + itemActualStringLength + " from compact byte " + itemCompactLengthByteValue);
                     return copyOfRange(buffer, currentOffset, buffer.length); // Or throw
                 }
-                
+
                 if (currentOffset + itemActualStringLength > buffer.length) {
                     System.err.println("ParseArray: Buffer too short for item " + i + " content. Needed: " + itemActualStringLength + ", available: " + (buffer.length - currentOffset));
                     return copyOfRange(buffer, currentOffset, buffer.length); // Or throw
@@ -251,37 +251,21 @@ public class Main {
         public DescribeTopicPartitionsRequest(byte[] id, byte[] body, Metadata metadata) {
             this.id = id;
             this.body = body;
-            ByteParser parser = new ByteParser(body); // Use a sequential parser
 
-            // Topics: COMPACT_ARRAY<TopicName: COMPACT_STRING, PartitionIndexes: COMPACT_ARRAY<INT32>>
-            int topicsArrayLength = parser.consumeVarInt(false);
-            int numTopics = topicsArrayLength - 1;
+            // Parse topics array
+            byte[] buffer = parseArray(body, this::parseTopics);
 
-            for (int i = 0; i < numTopics; i++) {
-                // Topic Name: COMPACT_STRING
-                int topicNameLenBytes = parser.consumeVarInt(false);
-                int topicNameActualLen = topicNameLenBytes - 1;
-                if (topicNameActualLen < 0) {
-                    System.err.println("DescribeTopicPartitionsRequest: Invalid topic name length for topic " + i + " (compact: " + topicNameCompactLength + ")");
-                    // Potentially break or throw an error
-                    this.cursor = new byte[]{(byte) 0xFF}; // Default to null cursor on error
-                    this.availableTopics = metadata.getTopics();
-                    this.partitions = metadata.getPartitions();
-                    this.message = createMessage(constructMessage()); // Construct with potentially partial topics list
-                    return;
-                }
-                byte[] topicNameBytes = parser.consume(topicNameActualLen);
-                String parsedTopicName = new String(topicNameBytes, StandardCharsets.UTF_8);
-                this.topics.add(parsedTopicName);
-                System.err.println("DescribeTopicPartitionsRequest: Parsed topic: " + parsedTopicName);
-                parser.consumeByte(); // Consume the '00' byte for partition_indexes array length.
-            }
-            // parser.consume(1);
-            byte cursorByte = parser.consumeByte(); // This should be 0xFF for a null cursor
-            this.cursor = new byte[]{cursorByte};
+            // Extract cursor
+            this.cursor = new byte[1];
+            System.arraycopy(buffer, 0, this.cursor, 0, 1);
+
+            // Remove tag buffer
+            buffer = removeTagBuffer(buffer);
+
             // Get metadata
             this.availableTopics = metadata.getTopics();
             this.partitions = metadata.getPartitions();
+
             // Create message
             this.message = createMessage(constructMessage());
         }
@@ -395,7 +379,7 @@ public class Main {
             }
         }
     }
-    
+
     private static byte[] copyOfRange(byte[] original, int from, int to) {
         if (from > to || from < 0 || to > original.length) {
             // Consider logging an error or throwing IllegalArgumentException if from/to are invalid
