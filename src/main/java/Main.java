@@ -107,10 +107,8 @@ public class Main {
             int numberOfElements = arrayCompactLength - 1;
 
             if (numberOfElements < 0) {
-                // This indicates an invalid compact array length (e.g., 0, which means -1 elements).
-                // A valid empty compact array has a length byte of 1 (meaning 0 elements).
                 System.err.println("ParseArray: Invalid compact array length byte: " + arrayCompactLength);
-                return buffer; // Or throw an exception, or return a specific part if error handling is different
+                return copyOfRange(buffer, 1, buffer.length); // Skip the array length byte and continue
             }
 
             int currentOffset = 1; // Start after the array compact length byte
@@ -118,28 +116,28 @@ public class Main {
             for (int i = 0; i < numberOfElements; i++) {
                 if (currentOffset >= buffer.length) {
                     System.err.println("ParseArray: Buffer too short for item " + i + " length byte.");
-                    // Return remaining unprocessed part, or throw
                     return copyOfRange(buffer, currentOffset, buffer.length);
                 }
 
-                // Assuming items are COMPACT_STRING as per DescribeTopicPartitionsRequest
                 int itemCompactLengthByteValue = buffer[currentOffset] & 0xFF;
                 int itemActualStringLength = itemCompactLengthByteValue - 1;
                 currentOffset++; // Move past item's compact length byte
 
                 if (itemActualStringLength < 0) {
                     System.err.println("ParseArray: Invalid item string length: " + itemActualStringLength + " from compact byte " + itemCompactLengthByteValue);
-                    return copyOfRange(buffer, currentOffset, buffer.length); // Or throw
+                    // Instead of returning, skip this item and continue
+                    continue;
                 }
 
                 if (currentOffset + itemActualStringLength > buffer.length) {
                     System.err.println("ParseArray: Buffer too short for item " + i + " content. Needed: " + itemActualStringLength + ", available: " + (buffer.length - currentOffset));
-                    return copyOfRange(buffer, currentOffset, buffer.length); // Or throw
+                    // Instead of returning, skip this item and continue
+                    continue;
                 }
 
                 byte[] itemData = copyOfRange(buffer, currentOffset, currentOffset + itemActualStringLength);
-                consumer.consume(itemData); // itemData is just the string bytes
-                currentOffset += itemActualStringLength; // Move past item's string data
+                consumer.consume(itemData);
+                currentOffset += itemActualStringLength;
             }
             return copyOfRange(buffer, currentOffset, buffer.length);
         }
