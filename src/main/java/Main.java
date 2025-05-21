@@ -79,25 +79,69 @@ public class Main {
         }
 
         /**
+         * Result of parsing a string.
+         */
+        static class StringParseResult {
+            public final String value;
+            public final byte[] remaining;
+
+            public StringParseResult(String value, byte[] remaining) {
+                this.value = value;
+                this.remaining = remaining;
+            }
+        }
+
+        /**
          * Parse an array from a buffer.
          * @param buffer The buffer.
          * @param consumer The consumer to apply to each item.
          * @return The remaining buffer.
          */
         protected byte[] parseArray(byte[] buffer, ArrayItemConsumer consumer) {
-            int arrLength = (buffer[0] & 0xFF) - 1;
-            byte[] arrBuffer = new byte[buffer.length - 1];
-            System.arraycopy(buffer, 1, arrBuffer, 0, buffer.length - 1);
-            for (int i = 0; i < arrLength; i++) {
-                int itemLength = arrBuffer[0] & 0xFF;
-                byte[] itemBuffer = new byte[itemLength - 1];
-                System.arraycopy(arrBuffer, 1, itemBuffer, 0, itemLength - 1);
-                consumer.consume(itemBuffer);
-                byte[] newArrBuffer = new byte[arrBuffer.length - itemLength - 1];
-                System.arraycopy(arrBuffer, itemLength + 1, newArrBuffer, 0, arrBuffer.length - itemLength - 1);
-                arrBuffer = newArrBuffer;
+            if (buffer == null || buffer.length == 0) {
+                System.err.println("ParseArray: Input buffer is null or empty.");
+                return new byte[0];
             }
-            return arrBuffer;
+
+            int arrayCompactLength = buffer[0] & 0xFF;
+            int numberOfElements = arrayCompactLength - 1;
+
+            if (numberOfElements < 0) {
+                // This indicates an invalid compact array length (e.g., 0, which means -1 elements).
+                // A valid empty compact array has a length byte of 1 (meaning 0 elements).
+                System.err.println("ParseArray: Invalid compact array length byte: " + arrayCompactLength);
+                return buffer; // Or throw an exception, or return a specific part if error handling is different
+            }
+
+            int currentOffset = 1; // Start after the array compact length byte
+
+            for (int i = 0; i < numberOfElements; i++) {
+                if (currentOffset >= buffer.length) {
+                    System.err.println("ParseArray: Buffer too short for item " + i + " length byte.");
+                    // Return remaining unprocessed part, or throw
+                    return copyOfRange(buffer, currentOffset, buffer.length);
+                }
+
+                // Assuming items are COMPACT_STRING as per DescribeTopicPartitionsRequest
+                int itemCompactLengthByteValue = buffer[currentOffset] & 0xFF;
+                int itemActualStringLength = itemCompactLengthByteValue - 1;
+                currentOffset++; // Move past item's compact length byte
+
+                if (itemActualStringLength < 0) {
+                    System.err.println("ParseArray: Invalid item string length: " + itemActualStringLength + " from compact byte " + itemCompactLengthByteValue);
+                    return copyOfRange(buffer, currentOffset, buffer.length); // Or throw
+                }
+                
+                if (currentOffset + itemActualStringLength > buffer.length) {
+                    System.err.println("ParseArray: Buffer too short for item " + i + " content. Needed: " + itemActualStringLength + ", available: " + (buffer.length - currentOffset));
+                    return copyOfRange(buffer, currentOffset, buffer.length); // Or throw
+                }
+
+                byte[] itemData = copyOfRange(buffer, currentOffset, currentOffset + itemActualStringLength);
+                consumer.consume(itemData); // itemData is just the string bytes
+                currentOffset += itemActualStringLength; // Move past item's string data
+            }
+            return copyOfRange(buffer, currentOffset, buffer.length);
         }
     }
 
@@ -106,19 +150,6 @@ public class Main {
      */
     interface ArrayItemConsumer {
         void consume(byte[] item);
-    }
-
-    /**
-     * Result of parsing a string.
-     */
-    static class StringParseResult {
-        public final String value;
-        public final byte[] remaining;
-
-        public StringParseResult(String value, byte[] remaining) {
-            this.value = value;
-            this.remaining = remaining;
-        }
     }
 
     /**
@@ -328,9 +359,9 @@ public class Main {
                 message.write(DEFAULT_THROTTLE_TIME);
                 // Topics array
                 message.write(topics.size() + 1); // Compact array length
-                // Add topic information
-                if (!topics.isEmpty()) {
-                    message.write(createTopicItem(topics.get(0).getBytes(StandardCharsets.UTF_8)));
+                // Add all topic information
+                for (String topic : topics) {
+                    message.write(createTopicItem(topic.getBytes(StandardCharsets.UTF_8)));
                 }
                 // Add cursor (null cursor)
                 message.write(0xFF);
@@ -342,6 +373,17 @@ public class Main {
                 return new byte[0];
             }
         }
+    }
+    
+    private static byte[] copyOfRange(byte[] original, int from, int to) {
+        if (from > to || from < 0 || to > original.length) {
+            // Consider logging an error or throwing IllegalArgumentException if from/to are invalid
+            return new byte[0]; // Return empty if range is invalid or empty
+        }
+        int newLength = to - from;
+        byte[] copy = new byte[newLength];
+        System.arraycopy(original, from, copy, 0, Math.min(original.length - from, newLength));
+        return copy;
     }
 
     /**
@@ -375,7 +417,8 @@ public class Main {
         }
 
         private void parseTopics(byte[] itemBuffer) {
-            topics.add(new String(itemBuffer, StandardCharsets.UTF_8));
+            String topic = new String(itemBuffer, StandardCharsets.UTF_8);
+            topics.add(topic);
         }
 
         private byte[] createTopicItem(byte[] topic) {
@@ -470,9 +513,9 @@ public class Main {
                 message.write(DEFAULT_THROTTLE_TIME);
                 // Topics array
                 message.write(topics.size() + 1); // Compact array length
-                // Add topic information
-                if (!topics.isEmpty()) {
-                    message.write(createTopicItem(topics.get(0).getBytes(StandardCharsets.UTF_8)));
+                // Add all topic information
+                for (String topic : topics) {
+                    message.write(createTopicItem(topic.getBytes(StandardCharsets.UTF_8)));
                 }
                 // Add cursor
                 message.write(0xFF);
@@ -503,8 +546,7 @@ public class Main {
             try (InputStream in = clientSocket.getInputStream();
                  OutputStream out = clientSocket.getOutputStream()) {
                 byte[] buffer = new byte[1024];
-                int bytesRead;
-                while ((bytesRead = in.read(buffer)) != -1) {
+                while (in.read(buffer) != -1) {
                     // Parse the request
                     KafkaHeader header = new KafkaHeader(buffer);
                     // Process based on API key
@@ -536,13 +578,14 @@ public class Main {
     }
 
     public static void runServer(Metadata metadata, int port) throws IOException {
-        ServerSocket serverSocket = new ServerSocket(port);
-        serverSocket.setReuseAddress(true);
-        System.out.println("Server listening...");
-        ExecutorService executor = Executors.newCachedThreadPool();
-        while (true) {
-            Socket clientSocket = serverSocket.accept();
-            executor.submit(new ClientHandler(clientSocket, metadata));
+        try (ServerSocket serverSocket = new ServerSocket(port)) {
+            serverSocket.setReuseAddress(true);
+            System.out.println("Server listening...");
+            ExecutorService executor = Executors.newCachedThreadPool();
+            while (true) {
+                Socket clientSocket = serverSocket.accept();
+                executor.submit(new ClientHandler(clientSocket, metadata));
+            }
         }
     }
 
