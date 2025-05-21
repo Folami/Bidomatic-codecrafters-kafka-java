@@ -116,7 +116,7 @@ public class Main {
             for (int i = 0; i < numberOfElements; i++) {
                 if (currentOffset >= buffer.length) {
                     System.err.println("ParseArray: Buffer too short for item " + i + " length byte.");
-                    break; // Instead of return, break out of the loop
+                    break;
                 }
 
                 int itemCompactLengthByteValue = buffer[currentOffset] & 0xFF;
@@ -125,12 +125,13 @@ public class Main {
 
                 if (itemActualStringLength < 0) {
                     System.err.println("ParseArray: Invalid item string length: " + itemActualStringLength + " from compact byte " + itemCompactLengthByteValue);
-                    continue; // Skip this item, continue with the next
+                    // Skip this item, but still move offset by 0 (no string bytes)
+                    continue;
                 }
 
                 if (currentOffset + itemActualStringLength > buffer.length) {
                     System.err.println("ParseArray: Buffer too short for item " + i + " content. Needed: " + itemActualStringLength + ", available: " + (buffer.length - currentOffset));
-                    break; // Instead of return, break out of the loop
+                    break;
                 }
 
                 byte[] itemData = copyOfRange(buffer, currentOffset, currentOffset + itemActualStringLength);
