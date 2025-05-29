@@ -198,21 +198,27 @@ public class Main {
                 body.write(id);
                 // Add error code
                 body.write(errorHandler());
-                // Add API keys array
-                body.write(3); // Array length (compact format, 3-1=2 elements)
-                // ApiVersions entry (key 18)
+                // API keys array (compact format: count = number of entries + 1)
+                // We will have 3 entries: ApiVersions, Fetch, DescribeTopicPartitions
+                body.write(4); // Array length for 3 entries
+                // 1. ApiVersions entry (key 18, minVersion 0, maxVersion 4)
                 body.write(ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 18).array());
                 body.write(ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 0).array());
                 body.write(ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 4).array());
                 body.write(0); // Tagged fields
-                // DescribeTopicPartitions entry (key 75)
+                // 2. Fetch entry (key 1, minVersion 0, maxVersion 16)
+                body.write(ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 1).array());
+                body.write(ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 0).array());
+                body.write(ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 16).array());
+                body.write(0); // Tagged fields
+                // 3. DescribeTopicPartitions entry (key 75, minVersion 0, maxVersion 0)
                 body.write(ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 75).array());
                 body.write(ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 0).array());
                 body.write(ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 0).array());
                 body.write(0); // Tagged fields
-                // Add throttle time and tag buffer
+                // Throttle time (INT32)
                 body.write(ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN).putInt(0).array());
-                body.write(0); // Tag buffer
+                body.write(0); // Final Tagged fields for the response body
                 return body.toByteArray();
             } catch (IOException e) {
                 e.printStackTrace();
