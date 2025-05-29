@@ -236,6 +236,50 @@ public class Main {
     }
 
     /**
+     * Fetch request class.
+     */
+    static class FetchRequest extends BaseKafka {
+        private final int versionInt;
+        private final byte[] correlationId;
+        private final byte[] requestBody; // Not parsed in this stage
+        public final byte[] message;
+
+        public FetchRequest(int versionInt, byte[] correlationId, byte[] requestBody) {
+            this.versionInt = versionInt;
+            this.correlationId = correlationId;
+            this.requestBody = requestBody;
+            this.message = createMessage(constructResponse());
+        }
+
+        private byte[] constructResponse() {
+            // FetchResponse V16 structure
+            // See: kafka-Fetch-API-Protocol-Summary.md or https://kafka.apache.org/protocol.html#The_Messages_Fetch
+            ByteArrayOutputStream responsePayload = new ByteArrayOutputStream();
+            try {
+                // Correlation ID (4 bytes)
+                responsePayload.write(this.correlationId);
+                // Header Tagged Fields (Uvarint, 0 means no tagged fields for FetchResponse v9+)
+                responsePayload.write(TAG_BUFFER); // (1 byte)
+
+                // Response Body
+                // ThrottleTimeMs (INT32)
+                responsePayload.write(ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN).putInt(0).array());
+                // ErrorCode (INT16) - Top-level error code
+                responsePayload.write(ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN).putShort((short) 0).array());
+                // SessionID (INT32)
+                responsePayload.write(ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN).putInt(0).array());
+                // Responses array (CompactArray of FetchableTopicResponse)
+                responsePayload.write((byte) 1); // Array length (0 entries + 1 for compact format)
+                // Tagged Fields at the end of the response body
+                responsePayload.write(TAG_BUFFER); // (1 byte)
+            } catch (IOException e) {
+                e.printStackTrace(); // Should not happen with ByteArrayOutputStream
+            }
+            return responsePayload.toByteArray();
+        }
+    }
+
+    /**
      * DescribeTopicPartitions request class.
      */
     static class DescribeTopicPartitionsRequest extends BaseKafka {
@@ -557,6 +601,9 @@ public class Main {
                     byte[] message;
                     if (header.keyInt == 18) { // ApiVersions
                         ApiRequest request = new ApiRequest(header.versionInt, header.id);
+                        message = request.message;
+                    } else if (header.keyInt == 1) { // Fetch API
+                        FetchRequest request = new FetchRequest(header.versionInt, header.id, header.body);
                         message = request.message;
                     } else if (header.keyInt == 75) { // DescribeTopicPartitions
                         DescribeTopicPartitionsRequest request = new DescribeTopicPartitionsRequest(header.id, header.body, metadata);
